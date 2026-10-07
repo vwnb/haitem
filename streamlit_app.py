@@ -6,6 +6,7 @@ import streamlit as st
 from customs_analysis import make_customs_pca
 from export_licences import (
     decisions_in_period,
+    load_decision_texts,
     load_year as load_licence_decisions_year,
     top_exporters,
 )
@@ -55,15 +56,27 @@ def request_product_query(product_prefix, sankey_prefix, selected_codes=None):
     bump_chart_versions()
 
 
-def navigate_to_product_classes(product_codes):
+def navigate_to_product_classes(product_codes, replace_selection=False):
     if not product_codes:
         return False
     if isinstance(product_codes, str):
         product_codes = (product_codes,)
-    current_codes = st.session_state.get("selectedProductClasses", [])
-    selected_codes = list(
-        dict.fromkeys([*current_codes, *(str(code) for code in product_codes)])
+    current_codes = (
+        []
+        if replace_selection
+        else st.session_state.get("selectedProductClasses", [])
     )
+    selected_codes = list(current_codes)
+    for code in dict.fromkeys(str(code) for code in product_codes):
+        selected_codes = [
+            current_code
+            for current_code in selected_codes
+            if not (
+                current_code.startswith(code)
+                or code.startswith(current_code)
+            )
+        ]
+        selected_codes.append(code)
     if (
         selected_codes == current_codes
         and "pending_product_prefixes" not in st.session_state
@@ -269,6 +282,25 @@ st.title("𓅋 Haitem • Trade & procurement flows of Finland")
 
 with st.sidebar:
     st.header("Query")
+    sidebar_sankey_prefix = st.session_state.get("sankey_prefix", "")
+    navigation_col, up_col = st.columns(2)
+    if navigation_col.button(
+        "Level 0",
+        key="sankey-reset-sidebar",
+        type="primary",
+        disabled=not sidebar_sankey_prefix,
+    ):
+        request_product_query("", "", None)
+        st.rerun()
+    if up_col.button(
+        "Up one level",
+        key="sankey-back-sidebar",
+        type="primary",
+        disabled=not sidebar_sankey_prefix,
+    ):
+        parent_prefix = sidebar_sankey_prefix[:-2]
+        request_product_query(parent_prefix, parent_prefix)
+        st.rerun()
     selected_query_codes = st.session_state.get("selectedProductClasses", [])
     for selected_query_code in selected_query_codes:
         classification_labels = st.session_state.get(
@@ -441,15 +473,6 @@ else:
                 f"Breakdown path: {source} → {format_cn_code(sankey_prefix)} "
                 f"→ {destination}"
             )
-            if st.button("Level 0", key="sankey-reset"):
-                request_product_query("", "", None)
-                st.rerun()
-            if st.button("Up one level", key="sankey-back"):
-                parent_prefix = sankey_prefix[:-2]
-                request_product_query(
-                    parent_prefix, parent_prefix
-                )
-                st.rerun()
         st.caption(
             f"Showing product classes for {source} → {destination} · "
             f"{first_period}–{last_period}"
@@ -487,7 +510,9 @@ else:
             clicked_category_code = selected_sankey_code(
                 clicked_points, category_codes
             )
-            if navigate_to_product_classes(clicked_category_code):
+            if navigate_to_product_classes(
+                clicked_category_code, replace_selection=True
+            ):
                 st.rerun()
             st.caption(
                 "Flow widths show recorded customs trade value, not money transfers. "
@@ -582,6 +607,7 @@ else:
                     title="Value (EUR)",
                     scale=alt.Scale(zero=True),
                     stack="zero",
+                    axis=alt.Axis(grid=False),
                 ),
                 y=alt.Y(
                     "CN group:N",
@@ -653,9 +679,9 @@ else:
                     )
                 )
                 st.caption(
-                    "Decision counts and sources cover the selected period; the "
-                    "plenary archive does not identify customs product classes. "
-                    "This archive is not a register of de facto exports."
+                    "Only decisions whose full text mentions one of the selected "
+                    "CN codes are shown. This text match does not establish "
+                    "de facto exports."
                 )
                 period_frequency = "M" if frequency == "month" else "Y"
                 period_start = pd.Period(
@@ -710,12 +736,36 @@ else:
                     except requests.RequestException as error:
                         licence_status.empty()
                         st.error(f"Could not load the public decision archive: {error}")
+                decision_texts_loaded = False
                 if has_matching_years:
+                    decision_status = st.empty()
+                    decision_status.caption(
+                        "Checking decision text for selected product-class codes..."
+                    )
+                    try:
+                        load_decision_texts(
+                            loaded_licences[1], period_start, period_end
+                        )
+                    except requests.RequestException as error:
+                        decision_status.empty()
+                        st.error(
+                            f"Could not load plenary decision details: {error}"
+                        )
+                    else:
+                        decision_status.empty()
+                        decision_texts_loaded = True
+                if decision_texts_loaded:
                     period_decisions = decisions_in_period(
-                        loaded_licences[1], period_start, period_end
+                        loaded_licences[1],
+                        period_start,
+                        period_end,
+                        selected_product_classes,
                     )
                     exporters = top_exporters(
-                        loaded_licences[1], period_start, period_end
+                        loaded_licences[1],
+                        period_start,
+                        period_end,
+                        product_codes=selected_product_classes,
                     )
                     if exporters:
                         exporter_frame = pd.DataFrame(exporters)
@@ -744,7 +794,16 @@ else:
                         )
                         st.altair_chart(exporter_chart, width="stretch")
                     else:
-                        st.info("No exporter names were parsed for this period.")
+                        if period_decisions:
+                            st.info(
+                                "No exporter names were parsed for decisions "
+                                "matching the selected product-class codes."
+                            )
+                        else:
+                            st.info(
+                                "No plenary decisions in this period mention the "
+                                "selected product-class codes."
+                            )
                     warnings = [
                         warning
                         for dataset in loaded_licences[1]
@@ -780,10 +839,10 @@ else:
                                 )
                             },
                         )
-                else:
+                elif not has_matching_years:
                     st.info(
                         "Load the public archive to see decision counts. "
-                        "Yearly results are cached locally."
+                        "Yearly results and decision text are cached locally."
                     )
         st.subheader("Product class PCA")
         with st.container():

@@ -31,6 +31,8 @@ _EXPORTER_RE = re.compile(
 _SESSION_DATE_RE = re.compile(
     r"Istunnon ajankohta\s+(\d{1,2}\.\d{1,2}\.\d{4})", re.IGNORECASE
 )
+_DATE_RE = re.compile(r"\b\d{1,2}[./-]\d{1,2}[./-](?:19|20)\d{2}\b")
+_CN_CODE_RE = re.compile(r"(?<!\d)\d{2}(?:[ .-]?\d{2}){0,3}(?!\d)")
 
 
 class _PageParser(HTMLParser):
@@ -191,7 +193,61 @@ def load_year(year, refresh=False):
     return dataset
 
 
-def decisions_in_period(datasets, start_date=None, end_date=None):
+def load_decision_texts(datasets, start_date=None, end_date=None):
+    """Fetch full text for decisions in the requested period, updating local caches."""
+    records = decisions_in_period(datasets, start_date, end_date)
+    missing_text = [record for record in records if "decisionText" not in record]
+    if not missing_text:
+        return
+
+    with requests.Session() as session:
+        for record in missing_text:
+            page = _parse_html(_get(record["sourceUrl"], session))
+            record["decisionText"] = " ".join(" ".join(page.text).split())
+
+    for dataset in datasets:
+        cache_path = _cache_path(dataset["year"])
+        if cache_path.exists():
+            with cache_path.open(encoding="utf-8") as cache_file:
+                cached_dataset = json.load(cache_file)
+            decision_text_by_id = {
+                record["decisionId"]: record["decisionText"]
+                for record in dataset["records"]
+                if "decisionText" in record
+            }
+            for record in cached_dataset["records"]:
+                decision_text = decision_text_by_id.get(record["decisionId"])
+                if decision_text is not None:
+                    record["decisionText"] = decision_text
+            with cache_path.open("w", encoding="utf-8") as cache_file:
+                json.dump(cached_dataset, cache_file, ensure_ascii=False, indent=2)
+                cache_file.write("\n")
+
+
+def _decision_matches_product_codes(record, product_codes):
+    selected_codes = tuple(
+        str(code).strip()
+        for code in product_codes
+        if re.fullmatch(r"\d{2,8}", str(code).strip())
+    )
+    if not selected_codes:
+        return True
+
+    text = _DATE_RE.sub(" ", record.get("decisionText", ""))
+    mentioned_codes = {
+        re.sub(r"\D", "", match)
+        for match in _CN_CODE_RE.findall(text)
+    }
+    return any(
+        mentioned_code.startswith(selected_code)
+        for mentioned_code in mentioned_codes
+        for selected_code in selected_codes
+    )
+
+
+def decisions_in_period(
+    datasets, start_date=None, end_date=None, product_codes=None
+):
     """Return cached decisions in an inclusive date range."""
     decisions = []
     for dataset in datasets:
@@ -208,6 +264,10 @@ def decisions_in_period(datasets, start_date=None, end_date=None):
                     continue
                 if end_date and decision_date > end_date:
                     continue
+            if product_codes and not _decision_matches_product_codes(
+                record, product_codes
+            ):
+                continue
             decisions.append(record)
     return sorted(
         decisions,
@@ -218,10 +278,14 @@ def decisions_in_period(datasets, start_date=None, end_date=None):
     )
 
 
-def top_exporters(datasets, start_date=None, end_date=None, limit=5):
+def top_exporters(
+    datasets, start_date=None, end_date=None, limit=5, product_codes=None
+):
     """Rank exact normalized exporter names by listed decision count."""
     exporters = {}
-    for record in decisions_in_period(datasets, start_date, end_date):
+    for record in decisions_in_period(
+        datasets, start_date, end_date, product_codes
+    ):
         exporter = record["exporter"]
         if not exporter:
             continue
