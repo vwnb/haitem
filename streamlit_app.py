@@ -1,5 +1,7 @@
+import re
 import altair as alt
 import pandas as pd
+import plotly.graph_objects as go
 import requests
 import streamlit as st
 
@@ -19,6 +21,16 @@ def load_data(country, flow, frequency, start, end, classification_id, product_c
         product_classification_id=classification_id,
         product_codes=list(product_codes) if product_codes else None,
     )
+
+
+@st.cache_data(ttl=3600, max_entries=1, show_spinner=False)
+def load_product_classification_labels():
+    client = UljasClient()
+    return {
+        2: client.product_classification_labels(4),
+        4: client.product_classification_labels(5),
+        6: client.product_classification_labels(6),
+    }
 
 
 def make_dataframes(result, frequency):
@@ -57,6 +69,158 @@ def make_dataframes(result, frequency):
         .sort_values("Value (EUR)", ascending=False)
     )
     return timeline, all_products.head(33), all_products, details
+
+
+def make_trade_sankey(
+    products, source, destination, classification_labels, parent_code=""
+):
+    codes = products["Product code"].astype(str)
+    valid_codes = codes.str.fullmatch(r"\d{2,8}")
+    trade_products = products.loc[
+        valid_codes & products["Value (EUR)"].gt(0)
+    ].copy()
+    trade_products["Product code"] = codes[valid_codes]
+    trade_products = trade_products.loc[
+        trade_products["Product code"].str.startswith(parent_code)
+    ]
+    max_depth = trade_products["Product code"].str.len().max()
+    if pd.isna(max_depth) or max_depth <= len(parent_code):
+        return None
+
+    depth = min(len(parent_code) + 2, int(max_depth))
+    trade_products["Drill code"] = trade_products["Product code"].str.slice(0, depth)
+    cn8_labels = trade_products.drop_duplicates("Product code").set_index(
+        "Product code"
+    )["Product"]
+    grouped_products = (
+        trade_products.groupby("Drill code", as_index=False)
+        .agg({"Value (EUR)": "sum"})
+        .sort_values("Value (EUR)", ascending=False)
+    )
+    grouped_products["Product"] = grouped_products["Drill code"].map(
+        lambda code: (
+            cn8_labels.get(code, "")
+            if len(code) == 8
+            else classification_labels.get(len(code), {}).get(code, "")
+        )
+    )
+    total_value = grouped_products["Value (EUR)"].sum()
+    trade_products = grouped_products
+    if trade_products.empty:
+        return None
+
+    visible_products = trade_products.head(8).reset_index(drop=True)
+    remaining_products = trade_products.iloc[8:]
+    if not remaining_products.empty:
+        visible_products.loc[len(visible_products)] = {
+            "Drill code": None,
+            "Product": f"Other products ({len(remaining_products):,} categories)",
+            "Value (EUR)": remaining_products["Value (EUR)"].sum(),
+        }
+
+    category_labels = [
+        (
+            row["Product"]
+            if pd.isna(row["Drill code"])
+            else (
+                re.sub(r"^\(\d{4}--(?:\d{4}|\.)\)\s*", "", row["Product"])
+                if row["Product"]
+                else "Product group"
+            )
+        )
+        for _, row in visible_products.iterrows()
+    ]
+    category_codes = [
+        None if pd.isna(code) else code for code in visible_products["Drill code"]
+    ]
+    category_count = len(category_labels)
+    category_positions = (
+        [0.5]
+        if category_count == 1
+        else [
+            0.02 + 0.96 * index / (category_count - 1)
+            for index in range(category_count)
+        ]
+    )
+    values = visible_products["Value (EUR)"].tolist()
+
+    figure = go.Figure(
+        go.Sankey(
+            arrangement="fixed",
+            node={
+                "label": [source, *category_labels, destination],
+                "color": ["#333a3d", *["#a9c0c8"] * category_count, "#426d78"],
+                "line": {"color": "#333a3d", "width": 0.5},
+                "pad": 16,
+                "thickness": 18,
+                "x": [0.02, *[0.5] * category_count, 0.98],
+                "y": [0.5, *category_positions, 0.5],
+                "hovertemplate": "%{label}<extra></extra>",
+            },
+            link={
+                "source": [0] * category_count
+                + list(range(1, category_count + 1)),
+                "target": list(range(1, category_count + 1))
+                + [category_count + 1] * category_count,
+                "value": values + values,
+                "color": ["rgba(66, 109, 120, 0.38)"] * (2 * category_count),
+                "hovertemplate": (
+                    "%{source.label} → %{target.label}<br>"
+                    "Recorded trade value: €%{value:,.0f}<extra></extra>"
+                ),
+            },
+        )
+    )
+    figure.add_trace(
+        go.Scatter(
+            x=[0.5] * category_count,
+            y=category_positions,
+            mode="markers",
+            marker={"color": "rgba(0, 0, 0, 0.001)", "size": 30},
+            customdata=list(zip(category_codes, category_labels, values)),
+            hovertemplate=(
+                "%{customdata[1]}<br>"
+                "Recorded trade value: €%{customdata[2]:,.0f}<extra></extra>"
+            ),
+            showlegend=False,
+        )
+    )
+    figure.update_layout(
+        height=min(1050, max(600, 210 + 62 * category_count)),
+        margin={"l": 145, "r": 145, "t": 24, "b": 24},
+        font={"family": "Arial, sans-serif", "size": 14, "color": "#202629"},
+        xaxis={
+            "range": [0, 1],
+            "visible": False,
+            "fixedrange": True,
+            "showgrid": False,
+            "zeroline": False,
+        },
+        yaxis={
+            "range": [1, 0],
+            "visible": False,
+            "fixedrange": True,
+            "showgrid": False,
+            "zeroline": False,
+        },
+    )
+    return figure, total_value, category_codes, category_labels
+
+
+def selected_sankey_code(clicked_points, category_codes):
+    if not clicked_points:
+        return None
+
+    clicked_point = clicked_points[0]
+    node_index = clicked_point.get("point_index", clicked_point.get("pointIndex"))
+    if (
+        clicked_point.get("curve_number", clicked_point.get("curveNumber"))
+        != 1
+        or not isinstance(node_index, int)
+        or not 0 <= node_index < len(category_codes)
+    ):
+        return None
+    return category_codes[node_index]
 
 
 def parse_product_codes(raw_codes):
@@ -217,13 +381,14 @@ st.markdown(
     """,
     unsafe_allow_html=True,
 )
-st.title("Haitem • trade & economic metrics")
-st.caption("Source: ULJAS (https://uljas.tulli.fi/v3rti/)")
+st.title("𓅋 Haitem • Trade & procurement flows of Finland")
 
 with st.sidebar:
     st.header("Query")
     with st.form("uljas-query"):
-        country = st.text_input("Partner country code", value="IL").strip().upper()
+        country = st.text_input(
+            "Partner country code (ISO-2)", value="", placeholder="e.g. SE"
+        ).strip().upper()
         flow = st.selectbox("Trade flow", ["exports", "imports"])
         frequency = st.selectbox("Time interval", ["month", "year"])
         period_format = "YYYYMM" if frequency == "month" else "YYYY"
@@ -236,6 +401,9 @@ with st.sidebar:
         end = st.text_input(
             f"End period ({period_format}; blank = latest)", value="", key=f"end-{frequency}"
         )
+        product_code_input = st.text_input(
+            "CN8 product codes (comma-separated, optional)"
+        )
         submitted = st.form_submit_button("Load statistics", type="primary")
     st.caption(
         "Data loads on submit or when a product bar is selected. Identical "
@@ -244,12 +412,19 @@ with st.sidebar:
 
 if submitted:
     st.session_state.pop("uljas_result", None)
+    st.session_state.pop("product_classification_labels", None)
     st.session_state.pop("selected_cn8_series", None)
     st.session_state.pop("selected_cn8_code", None)
+    st.session_state.pop("sankey_prefix", None)
     st.session_state["product_chart_version"] = (
         st.session_state.get("product_chart_version", 0) + 1
     )
+    st.session_state["sankey_chart_version"] = (
+        st.session_state.get("sankey_chart_version", 0) + 1
+    )
     try:
+        if not country:
+            raise ValueError("Enter a partner country code (ISO-2).")
         product_codes = parse_product_codes(product_code_input)
         with st.spinner("Loading data from ULJAS..."):
             result = load_data(
@@ -264,6 +439,7 @@ if submitted:
         timeline, top_products, all_products, details = make_dataframes(
             result, frequency
         )
+        classification_labels = load_product_classification_labels()
         st.session_state["uljas_result"] = (
             result,
             timeline,
@@ -277,6 +453,7 @@ if submitted:
             start,
             end,
         )
+        st.session_state["product_classification_labels"] = classification_labels
     except (requests.RequestException, RuntimeError, ValueError) as error:
         st.error(f"Could not load ULJAS data: {error}")
 
@@ -312,8 +489,115 @@ else:
             f"€{total:,.0f}",
         )
 
+        source = "Finland" if flow == "exports" else country
+        destination = country if flow == "exports" else "Finland"
+        st.subheader(f"Trade flow · {source} → {destination}")
+        sankey_prefix = st.session_state.get("sankey_prefix", "")
+        if sankey_prefix:
+            path = " → ".join(
+                f"CN {sankey_prefix[:depth]}"
+                for depth in range(2, len(sankey_prefix) + 1, 2)
+            )
+            st.caption(f"Breakdown path: {source} → {path} → {destination}")
+            back_column, reset_column = st.columns(2)
+            with back_column:
+                if st.button("Back one level", key="sankey-back"):
+                    st.session_state["sankey_prefix"] = sankey_prefix[:-2]
+                    st.session_state["product_chart_version"] = (
+                        st.session_state.get("product_chart_version", 0) + 1
+                    )
+                    st.session_state["sankey_chart_version"] = (
+                        st.session_state.get("sankey_chart_version", 0) + 1
+                    )
+                    st.rerun()
+            with reset_column:
+                if st.button("Reset Sankey", key="sankey-reset"):
+                    st.session_state.pop("sankey_prefix", None)
+                    st.session_state["product_chart_version"] = (
+                        st.session_state.get("product_chart_version", 0) + 1
+                    )
+                    st.session_state["sankey_chart_version"] = (
+                        st.session_state.get("sankey_chart_version", 0) + 1
+                    )
+                    st.rerun()
+        st.caption(
+            f"Showing product classes for {source} → {destination} · "
+            f"{first_period}–{last_period}"
+        )
+        trade_sankey = make_trade_sankey(
+            all_products,
+            source,
+            destination,
+            st.session_state.get("product_classification_labels", {}),
+            sankey_prefix,
+        )
+        if trade_sankey is None:
+            if sankey_prefix:
+                st.info(
+                    f"CN {sankey_prefix} is at the most detailed level available. "
+                    "Its time series is shown below."
+                )
+            else:
+                st.info(
+                    "No positive trade values are available for this selection. "
+                    "Clear any CN8 product filter to check all categories."
+                )
+        else:
+            figure, represented_value, category_codes, category_labels = trade_sankey
+            st.metric("Positive trade value shown", f"€{represented_value:,.0f}")
+            chart_event = st.plotly_chart(
+                figure,
+                use_container_width=True,
+                on_select="rerun",
+                selection_mode="points",
+                key=(
+                    f"trade-sankey-{sankey_prefix or 'root'}-"
+                    f"{st.session_state.get('sankey_chart_version', 0)}"
+                ),
+            )
+            clicked_category_code = selected_sankey_code(
+                chart_event["selection"].get("points", []), category_codes
+            )
+            if clicked_category_code:
+                st.session_state["sankey_prefix"] = clicked_category_code
+                st.session_state.pop("selected_cn8_series", None)
+                st.session_state.pop("selected_cn8_code", None)
+                st.session_state["product_chart_version"] = (
+                    st.session_state.get("product_chart_version", 0) + 1
+                )
+                st.session_state["sankey_chart_version"] = (
+                    st.session_state.get("sankey_chart_version", 0) + 1
+                )
+                st.rerun()
+            st.caption(
+                "Flow widths show recorded customs trade value, not money transfers. "
+                "Click a product node to drill down into its next code level. "
+                "The 8 largest positive categories are shown individually; "
+                "remaining positive categories are grouped as non-clickable Other."
+            )
+
+        if sankey_prefix:
+            selected_rows = details.loc[
+                details["Product code"].astype(str).str.startswith(sankey_prefix)
+            ]
+            selected_timeline = (
+                selected_rows.groupby("Date", as_index=False)["Value (EUR)"]
+                .sum()
+                .sort_values("Date")
+            )
+            st.subheader(f"{frequency.title()} trade value · CN {sankey_prefix}")
+            if selected_timeline.empty:
+                st.info("No time-series values are available for this category.")
+            else:
+                st.line_chart(
+                    selected_timeline,
+                    x="Date",
+                    y="Value (EUR)",
+                    color="#426D78",
+                )
+
         st.subheader(
-            "Selected CN8 categories" if product_codes else "Top 33 product categories"
+            "Selected CN8 categories" if product_codes else "Top 33 product classes"
         )
         if product_codes:
             st.caption(
@@ -349,7 +633,7 @@ else:
                     x=alt.X("Value (EUR):Q", title="Value (EUR)", scale=alt.Scale(zero=True)),
                     y=alt.Y("Product code:N", sort="-x", title="CN code"),
                     tooltip=[
-                        alt.Tooltip("Product:N", title="Product category"),
+                        alt.Tooltip("Product:N", title="product class"),
                         alt.Tooltip("Product code:N", title="CN code"),
                         alt.Tooltip("Value (EUR):Q", format=",.0f"),
                     ],
@@ -377,6 +661,11 @@ else:
             if clicked_product_code != st.session_state.get("selected_cn8_code"):
                 st.session_state["selected_cn8_code"] = clicked_product_code
                 st.session_state.pop("selected_cn8_series", None)
+                if clicked_product_code:
+                    st.session_state.pop("sankey_prefix", None)
+                    st.session_state["sankey_chart_version"] = (
+                        st.session_state.get("sankey_chart_version", 0) + 1
+                    )
         with right:
             st.dataframe(
                 top_products,
@@ -437,7 +726,7 @@ else:
                         y="Value (EUR)",
                         color="#426D78",
                     )
-        elif product_codes:
+        elif not sankey_prefix and product_codes:
             st.subheader(f"{frequency.title()} trade value · selected CN8 products")
             st.caption("Each selected CN8 code is plotted as its own series.")
             time_series_chart = (
@@ -466,10 +755,10 @@ else:
                 .configure_view(stroke="#A9C0C8")
             )
             st.altair_chart(time_series_chart, use_container_width=True)
-        else:
+        elif not sankey_prefix:
             st.subheader(f"{frequency.title()} trade value")
             st.caption(
-                "Series is the total across all returned CN8 product categories."
+                "Series is the total across all returned CN8 product classes."
             )
             st.line_chart(
                 timeline,
@@ -478,7 +767,7 @@ else:
                 color="#426D78",
             )
 
-        with st.expander(f"All {len(all_products):,} product categories"):
+        with st.expander(f"All {len(all_products):,} product classes"):
             st.caption(
                 "Scrollable table of every returned category, sorted by total "
                 "value for the selected period."
