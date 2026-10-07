@@ -441,18 +441,15 @@ else:
                 f"Breakdown path: {source} → {format_cn_code(sankey_prefix)} "
                 f"→ {destination}"
             )
-            back_column, reset_column = st.columns(2)
-            with back_column:
-                if st.button("Back one level", key="sankey-back"):
-                    parent_prefix = sankey_prefix[:-2]
-                    request_product_query(
-                        parent_prefix, parent_prefix
-                    )
-                    st.rerun()
-            with reset_column:
-                if st.button("Reset Sankey", key="sankey-reset"):
-                    request_product_query("", "", None)
-                    st.rerun()
+            if st.button("Level 0", key="sankey-reset"):
+                request_product_query("", "", None)
+                st.rerun()
+            if st.button("Up one level", key="sankey-back"):
+                parent_prefix = sankey_prefix[:-2]
+                request_product_query(
+                    parent_prefix, parent_prefix
+                )
+                st.rerun()
         st.caption(
             f"Showing product classes for {source} → {destination} · "
             f"{first_period}–{last_period}"
@@ -526,37 +523,7 @@ else:
         chart_version = st.session_state.get("product_chart_version", 0)
         product_chart_column, licence_chart_column = st.columns([2, 1])
         product_class_codes = all_products["Product code"].astype(str).tolist()
-        product_class_labels = (
-            all_products.assign(
-                **{"Product code": all_products["Product code"].astype(str)}
-            )
-            .set_index("Product code")["Product"]
-            .to_dict()
-        )
-        selected_class_codes = st.multiselect(
-            "Product classes to display",
-            options=product_class_codes,
-            default=product_class_codes[: min(40, len(product_class_codes))],
-            format_func=lambda code: (
-                f"{format_cn_code(code)} · {product_class_labels.get(code, code)}"
-            ),
-            key=(
-                f"selected-product-classes-{country}-{flow}-{frequency}-"
-                f"{start}-{end}-{hash(tuple(product_class_codes))}"
-            ),
-        )
-        if selected_class_codes and st.button(
-            "Query selected product classes",
-            key="query-selected-product-classes",
-            help="Load the union of the selected CN classes in all charts.",
-        ):
-            request_product_query(
-                selected_class_codes[0], "", selected_class_codes
-            )
-            st.rerun()
-        selected_products = all_products.loc[
-            all_products["Product code"].astype(str).isin(selected_class_codes)
-        ].copy()
+        selected_products = all_products.head(50).copy()
         selected_products["Product code"] = selected_products["Product code"].astype(
             str
         )
@@ -570,7 +537,8 @@ else:
         with product_chart_column:
             st.subheader("Product classes · 2-digit groups")
             st.caption(
-                f"Showing {len(selected_class_codes):,} selected classes across "
+                f"Showing the top {len(selected_products):,} of "
+                f"{len(all_products):,} product classes across "
                 f"{selected_group_count:,} groups. Each bar is grouped by its "
                 "two-digit code and stacked by product class; select a segment "
                 "to load its time series."
@@ -660,7 +628,7 @@ else:
                 width="stretch",
                 key=(
                     f"product-category-chart-{chart_version}-"
-                    f"{hash(tuple(selected_class_codes))}"
+                    f"{hash(tuple(product_class_codes))}"
                 ),
                 on_select="rerun",
                 selection_mode="product_class_bar_selection",
@@ -830,27 +798,9 @@ else:
                 "The available customs and exporter datasets do not link company "
                 "names to product classes or customs values."
             )
-            pca_codes = product_class_codes
-            pca_labels = (
-                all_products.assign(
-                    **{"Product code": all_products["Product code"].astype(str)}
-                )
-                .set_index("Product code")["Product"]
-                .to_dict()
-            )
-            selected_pca_codes = st.multiselect(
-                "Product classes in PCA",
-                options=pca_codes,
-                default=selected_class_codes[: min(8, len(selected_class_codes))],
-                format_func=lambda code: (
-                    f"{format_cn_code(code)} · {pca_labels.get(code, code)}"
-                ),
-                max_selections=12,
-                key=(
-                    f"customs-pca-{country}-{flow}-{frequency}-{start}-{end}-"
-                    f"{hash(tuple(pca_codes))}"
-                ),
-            )
+            selected_pca_codes = product_class_codes[
+                : min(8, len(product_class_codes))
+            ]
             try:
                 pca_scores, pca_categories, explained_variance = make_customs_pca(
                     details, selected_pca_codes
