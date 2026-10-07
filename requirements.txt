@@ -1,5 +1,6 @@
 requests>=2.32,<3
 pandas>=2,<4
+numpy>=1.26,<3
 plotly>=5,<7
 streamlit>=1.40,<2
 streamlit-plotly-events>=0.0.6,<0.1

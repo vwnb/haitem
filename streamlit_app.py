@@ -3,6 +3,7 @@ import pandas as pd
 import requests
 import streamlit as st
 
+from customs_analysis import make_customs_pca
 from export_licences import (
     decisions_in_period,
     load_year as load_licence_decisions_year,
@@ -616,6 +617,138 @@ else:
                 st.info(
                     "Load the public archive to see decision counts. "
                     "Yearly results are cached locally."
+                )
+        with st.expander("Customs product-category PCA", expanded=True):
+            st.caption(
+                "Two-axis PCA summarizes how selected product-category customs "
+                "values move together over time. Periods are points; category "
+                "coordinates show their contribution to the axes. Values are "
+                "standardized by category so large categories do not dominate."
+            )
+            st.info(
+                "This uses customs product categories, not procurement categories. "
+                "The available customs and exporter datasets do not link company "
+                "names to product categories or customs values."
+            )
+            pca_codes = top_products["Product code"].astype(str).tolist()
+            pca_labels = (
+                top_products.assign(
+                    **{"Product code": top_products["Product code"].astype(str)}
+                )
+                .set_index("Product code")["Product"]
+                .to_dict()
+            )
+            selected_pca_codes = st.multiselect(
+                "Product categories",
+                options=pca_codes,
+                default=pca_codes[: min(8, len(pca_codes))],
+                format_func=lambda code: (
+                    f"{format_cn_code(code)} · {pca_labels.get(code, code)}"
+                ),
+                max_selections=12,
+                key=(
+                    f"customs-pca-{country}-{flow}-{frequency}-{start}-{end}-"
+                    f"{hash(tuple(pca_codes))}"
+                ),
+            )
+            try:
+                pca_scores, pca_categories, explained_variance = make_customs_pca(
+                    details, selected_pca_codes
+                )
+            except ValueError as error:
+                st.info(str(error))
+            else:
+                st.metric(
+                    "Variance explained by displayed axes",
+                    f"{explained_variance.sum():.1%}",
+                )
+                period_chart = (
+                    alt.Chart(pca_scores)
+                    .mark_circle(size=100, color="#426D78")
+                    .encode(
+                        x=alt.X(
+                            "PC1:Q",
+                            title=f"PC1 ({explained_variance[0]:.1%})",
+                            scale=alt.Scale(zero=False),
+                        ),
+                        y=alt.Y(
+                            "PC2:Q",
+                            title=f"PC2 ({explained_variance[1]:.1%})",
+                            scale=alt.Scale(zero=False),
+                        ),
+                        tooltip=[
+                            alt.Tooltip("Period:T", title="Period"),
+                            alt.Tooltip("PC1:Q", format=".3f"),
+                            alt.Tooltip("PC2:Q", format=".3f"),
+                        ],
+                    )
+                )
+                category_points = (
+                    alt.Chart(pca_categories)
+                    .mark_point(
+                        shape="diamond",
+                        size=110,
+                        color="#333A3D",
+                        filled=True,
+                    )
+                    .encode(
+                        x=alt.X("PC1:Q"),
+                        y=alt.Y("PC2:Q"),
+                        tooltip=[
+                            alt.Tooltip("Product:N", title="Product category"),
+                            alt.Tooltip("Product code:N", title="Product code"),
+                            alt.Tooltip("PC1:Q", title="PC1 coordinate", format=".3f"),
+                            alt.Tooltip("PC2:Q", title="PC2 coordinate", format=".3f"),
+                        ],
+                    )
+                )
+                category_labels = (
+                    alt.Chart(pca_categories)
+                    .mark_text(
+                        align="left",
+                        baseline="middle",
+                        dx=7,
+                        fontSize=10,
+                        color="#202629",
+                    )
+                    .encode(
+                        x=alt.X("PC1:Q"),
+                        y=alt.Y("PC2:Q"),
+                        text=alt.Text("Product code:N"),
+                    )
+                )
+                pca_chart = (
+                    (period_chart + category_points + category_labels)
+                    .properties(height=440)
+                    .interactive()
+                    .configure_axis(
+                        labelColor="#333A3D",
+                        titleColor="#333A3D",
+                        gridColor="#A9C0C866",
+                        domainColor="#A9C0C8",
+                        labelFont="Arial",
+                        titleFont="Arial",
+                    )
+                    .configure_view(stroke="#A9C0C8")
+                )
+                st.altair_chart(pca_chart, width="stretch")
+                st.caption(
+                    "Nearby periods have similar standardized customs-value "
+                    "profiles. Category coordinates indicate association with "
+                    "each axis; they are not company-level observations."
+                )
+                st.dataframe(
+                    pca_categories.sort_values("Product code"),
+                    hide_index=True,
+                    width="stretch",
+                    column_config={
+                        "PC1": st.column_config.NumberColumn(
+                            "PC1 coordinate", format="%.3f"
+                        ),
+                        "PC2": st.column_config.NumberColumn(
+                            "PC2 coordinate", format="%.3f"
+                        ),
+                    },
                 )
         clicked_product_code = selected_product_code(chart_event.selection)
         if (
