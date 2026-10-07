@@ -29,3 +29,6 @@ dist/
 # Editor and OS files
 .vscode/
 .DS_Store
+
+# Data files
+data/*

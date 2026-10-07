@@ -11,6 +11,11 @@ import streamlit as st
 import streamlit.components.v1 as components
 import streamlit_plotly_events
 
+from export_licences import (
+    decisions_in_period,
+    load_year as load_licence_decisions_year,
+    top_exporters,
+)
 from index import DEFAULT_CUBE_ID, UljasClient
 
 
@@ -288,6 +293,7 @@ def selected_table_product_code(selection, products):
 
 
 st.set_page_config(page_title="Haitem • trade & economic metrics", page_icon="📊", layout="wide")
+st.session_state.setdefault("selectedProductClass", None)
 st.markdown(
     """
     <style>
@@ -326,6 +332,10 @@ st.markdown(
         font-family: Arial, Helvetica, sans-serif;
         font-weight: 850;
         margin: 2rem 0 1rem 0;
+    }
+
+    h1 a, h2 a, h3 a {
+        display: none !important;
     }
 
     h1 {
@@ -487,7 +497,7 @@ if submitted:
     st.session_state.pop("uljas_result", None)
     st.session_state.pop("product_classification_labels", None)
     st.session_state.pop("selected_cn8_series", None)
-    st.session_state.pop("selected_cn8_code", None)
+    st.session_state.pop("selectedProductClass", None)
     st.session_state.pop("sankey_prefix", None)
     st.session_state["product_chart_version"] = (
         st.session_state.get("product_chart_version", 0) + 1
@@ -631,7 +641,7 @@ else:
             if clicked_category_code:
                 st.session_state["sankey_prefix"] = clicked_category_code
                 st.session_state.pop("selected_cn8_series", None)
-                st.session_state.pop("selected_cn8_code", None)
+                st.session_state.pop("selectedProductClass", None)
                 st.session_state["product_chart_version"] = (
                     st.session_state.get("product_chart_version", 0) + 1
                 )
@@ -669,31 +679,33 @@ else:
                     color="#426D78",
                 )
 
-        st.subheader(
-            "Selected CN8 categories" if product_codes else "Top 33 product classes"
-        )
-        if product_codes:
-            st.caption(
-                f"Showing {len(top_products):,} of {len(all_products):,} selected "
-                "categories. Click a bar to load its time series."
-            )
-        else:
-            st.caption(
-                f"Showing {len(top_products):,} of {len(all_products):,} categories. "
-                "Hover a bar to highlight it and see its full name; click to load "
-                "its time series."
-            )
         chart_version = st.session_state.get("product_chart_version", 0)
-        if st.session_state.get("selected_cn8_code"):
-            if st.button("Clear product selection", key="clear-cn8-selection"):
-                st.session_state.pop("selected_cn8_series", None)
-                st.session_state.pop("selected_cn8_code", None)
-                st.session_state["product_chart_version"] = chart_version + 1
-                chart_version += 1
+        product_chart_column, licence_chart_column = st.columns([2, 1])
+        with product_chart_column:
+            st.subheader(
+                "Selected CN8 categories" if product_codes else "Top 33 product classes"
+            )
+            if product_codes:
+                st.caption(
+                    f"Showing {len(top_products):,} of {len(all_products):,} selected "
+                    "categories. Click a bar to load its time series."
+                )
+            else:
+                st.caption(
+                    f"Showing {len(top_products):,} of {len(all_products):,} categories. "
+                    "Hover a bar to highlight it and see its full name; click to load "
+                    "its time series."
+                )
+            if st.session_state.get("selectedProductClass"):
+                if st.button("Clear product selection", key="clear-cn8-selection"):
+                    st.session_state.pop("selected_cn8_series", None)
+                    st.session_state.pop("selectedProductClass", None)
+                    st.session_state["product_chart_version"] = chart_version + 1
+                    chart_version += 1
         product_selection = alt.selection_point(
             fields=["Product code"],
             name="cn8_bar_selection",
-            clear="dblclick",
+            clear=False,
             toggle=False,
         )
         bar_hover = alt.selection_point(
@@ -719,6 +731,11 @@ else:
                     sort="-x",
                     axis=alt.Axis(title="CN code"),
                 ),
+                color=alt.Color(
+                    "Value (EUR):Q",
+                    scale=alt.Scale(range=["#A9C0C8", "#426D78"]),
+                    legend=None,
+                ),
                 opacity=alt.condition(bar_hover, alt.value(1), alt.value(0.82)),
                 tooltip=[
                     alt.Tooltip("Product:N", title="product class"),
@@ -739,24 +756,149 @@ else:
             )
             .configure_view(stroke="#A9C0C8")
         )
-        chart_event = st.altair_chart(
-            product_chart,
-            width="stretch",
-            key=f"product-category-chart-{chart_version}",
-            on_select="rerun",
-            selection_mode="cn8_bar_selection",
-        )
-        clicked_product_code = selected_product_code(chart_event.selection)
-        if clicked_product_code != st.session_state.get("selected_cn8_code"):
-            st.session_state["selected_cn8_code"] = clicked_product_code
-            st.session_state.pop("selected_cn8_series", None)
-            if clicked_product_code:
-                st.session_state.pop("sankey_prefix", None)
-                st.session_state["sankey_chart_version"] = (
-                    st.session_state.get("sankey_chart_version", 0) + 1
+        with product_chart_column:
+            chart_event = st.altair_chart(
+                product_chart,
+                width="stretch",
+                key=f"product-category-chart-{chart_version}",
+                on_select="rerun",
+                selection_mode="cn8_bar_selection",
+            )
+        with licence_chart_column:
+            st.subheader("Top 5 exporters · plenary decisions")
+            st.caption(
+                "Ranked by listed decision count across all destinations in this period. "
+                "This plenary archive is not a complete register; decisions are not "
+                "completed exports, and their counts are not customs trade values."
+            )
+            period_frequency = "M" if frequency == "month" else "Y"
+            period_start = pd.Period(
+                start or timeline["Date"].min(), freq=period_frequency
+            ).start_time.date()
+            period_end = pd.Period(
+                end or timeline["Date"].max(), freq=period_frequency
+            ).end_time.date()
+            licence_years = tuple(range(period_start.year, period_end.year + 1))
+            loaded_licences = st.session_state.get("public_licence_decisions")
+            has_matching_years = (
+                loaded_licences is not None and loaded_licences[0] == licence_years
+            )
+            load_col, refresh_col = st.columns(2)
+            with load_col:
+                load_licences = st.button(
+                    "Load decisions",
+                    key=f"load-licence-decisions-{licence_years}",
+                    help="Loads cached decisions, or retrieves the official archive by year.",
                 )
+            with refresh_col:
+                refresh_licences = st.button(
+                    "Refresh",
+                    key=f"refresh-licence-decisions-{licence_years}",
+                    help="Re-enumerates the official yearly archive pages.",
+                )
+            if load_licences or refresh_licences:
+                try:
+                    with st.spinner("Loading public export-licence decisions..."):
+                        datasets = [
+                            load_licence_decisions_year(
+                                year, refresh=refresh_licences
+                            )
+                            for year in licence_years
+                        ]
+                    st.session_state["public_licence_decisions"] = (
+                        licence_years,
+                        datasets,
+                    )
+                    loaded_licences = (licence_years, datasets)
+                    has_matching_years = True
+                except requests.RequestException as error:
+                    st.error(f"Could not load the public decision archive: {error}")
+            if has_matching_years:
+                period_decisions = decisions_in_period(
+                    loaded_licences[1], period_start, period_end
+                )
+                exporters = top_exporters(
+                    loaded_licences[1], period_start, period_end
+                )
+                if exporters:
+                    exporter_frame = pd.DataFrame(exporters)
+                    exporter_chart = (
+                        alt.Chart(exporter_frame)
+                        .mark_bar(color="#426D78")
+                        .encode(
+                            x=alt.X("Decisions:Q", title="Decision count"),
+                            y=alt.Y("Exporter:N", sort="-x", title=None),
+                            tooltip=[
+                                alt.Tooltip("Exporter:N", title="Exporter"),
+                                alt.Tooltip("Decisions:Q", title="Public decisions"),
+                            ],
+                        )
+                        .configure_axis(
+                            labelColor="#333A3D",
+                            titleColor="#333A3D",
+                            gridColor="#A9C0C866",
+                            domainColor="#A9C0C8",
+                            labelFont="Arial",
+                            titleFont="Arial",
+                        )
+                        .configure_view(stroke="#A9C0C8")
+                    )
+                    st.altair_chart(exporter_chart, width="stretch")
+                else:
+                    st.info("No exporter names were parsed for this period.")
+                warnings = [
+                    warning
+                    for dataset in loaded_licences[1]
+                    for warning in dataset["warnings"]
+                ]
+                if warnings:
+                    st.warning(
+                        f"{len(warnings)} archive entries could not be fully parsed. "
+                        f"Example: {warnings[0]}"
+                    )
+                with st.expander(
+                    f"Decision sources · {len(period_decisions)} records"
+                ):
+                    source_rows = [
+                        {
+                            "Date": record["decisionDate"],
+                            "Exporter": record["exporter"] or "Not identified",
+                            "Decision": record["decisionTitle"],
+                            "Source": record["sourceUrl"],
+                        }
+                        for record in period_decisions
+                    ]
+                    st.dataframe(
+                        pd.DataFrame(
+                            source_rows,
+                            columns=["Date", "Exporter", "Decision", "Source"],
+                        ),
+                        hide_index=True,
+                        width="stretch",
+                        column_config={
+                            "Source": st.column_config.LinkColumn(
+                                "Source", display_text="Open decision"
+                            )
+                        },
+                    )
+            else:
+                st.info(
+                    "Load the public archive to see decision counts. "
+                    "Yearly results are cached locally."
+                )
+        clicked_product_code = selected_product_code(chart_event.selection)
+        if (
+            clicked_product_code
+            and clicked_product_code != st.session_state.get("selectedProductClass")
+        ):
+            st.session_state["selectedProductClass"] = clicked_product_code
+            st.session_state.pop("selected_cn8_series", None)
+            st.session_state.pop("sankey_prefix", None)
+            st.session_state["sankey_chart_version"] = (
+                st.session_state.get("sankey_chart_version", 0) + 1
+            )
 
-        selected_code = st.session_state.get("selected_cn8_code")
+        selected_code = st.session_state.get("selectedProductClass")
         if selected_code:
             selection_signature = (
                 country,
@@ -891,9 +1033,9 @@ else:
             )
             if (
                 table_product_code
-                and table_product_code != st.session_state.get("selected_cn8_code")
+                and table_product_code != st.session_state.get("selectedProductClass")
             ):
-                st.session_state["selected_cn8_code"] = table_product_code
+                st.session_state["selectedProductClass"] = table_product_code
                 st.session_state.pop("selected_cn8_series", None)
                 st.session_state.pop("sankey_prefix", None)
                 st.session_state["sankey_chart_version"] = (
