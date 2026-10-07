@@ -14,9 +14,9 @@ from trade_data import (
     load_data,
     load_product_classification_labels,
     make_dataframes,
-    product_query_for_prefix,
-    selected_product_code,
-    selected_table_product_code,
+    product_query_for_codes,
+    selected_product_codes,
+    selected_table_product_codes,
 )
 from trade_visualizations import (
     make_trade_sankey,
@@ -26,7 +26,11 @@ from trade_visualizations import (
 
 
 st.set_page_config(page_title="Haitem • trade & economic metrics", page_icon="📊", layout="wide")
-st.session_state.setdefault("selectedProductClass", None)
+if "selectedProductClasses" not in st.session_state:
+    previous_selected_class = st.session_state.get("selectedProductClass")
+    st.session_state["selectedProductClasses"] = (
+        [str(previous_selected_class)] if previous_selected_class else []
+    )
 
 
 def bump_chart_versions():
@@ -34,31 +38,46 @@ def bump_chart_versions():
         st.session_state[key] = st.session_state.get(key, 0) + 1
 
 
-def request_product_query(product_prefix, sankey_prefix, selected_code=None):
+def request_product_query(product_prefix, sankey_prefix, selected_codes=None):
     product_prefix = str(product_prefix)
     sankey_prefix = str(sankey_prefix)
-    st.session_state["pending_product_prefix"] = product_prefix
+    if selected_codes is None:
+        selected_codes = (product_prefix,) if product_prefix else ()
+    elif isinstance(selected_codes, str):
+        selected_codes = (selected_codes,)
+    else:
+        selected_codes = tuple(dict.fromkeys(str(code) for code in selected_codes))
+    query_prefixes = selected_codes or ((product_prefix,) if product_prefix else ())
+    st.session_state["pending_product_prefixes"] = query_prefixes
     st.session_state["sankey_prefix"] = sankey_prefix
     st.session_state["sankey_depth"] = len(sankey_prefix) // 2
-    st.session_state["selectedProductClass"] = selected_code
+    st.session_state["selectedProductClasses"] = list(selected_codes)
     bump_chart_versions()
 
 
-def navigate_to_product_class(product_code):
-    if not product_code:
+def navigate_to_product_classes(product_codes):
+    if not product_codes:
         return False
-    product_code = str(product_code)
+    if isinstance(product_codes, str):
+        product_codes = (product_codes,)
+    current_codes = st.session_state.get("selectedProductClasses", [])
+    selected_codes = list(
+        dict.fromkeys([*current_codes, *(str(code) for code in product_codes)])
+    )
     if (
-        product_code == st.session_state.get("selectedProductClass")
-        and "pending_product_prefix" not in st.session_state
+        selected_codes == current_codes
+        and "pending_product_prefixes" not in st.session_state
     ):
         return False
-    sankey_prefix = (
-        product_code[:-2]
-        if product_code.isdigit() and len(product_code) == 8
-        else product_code
-    )
-    request_product_query(product_code, sankey_prefix, product_code)
+    sankey_prefix = ""
+    if len(selected_codes) == 1:
+        selected_code = selected_codes[0]
+        sankey_prefix = (
+            selected_code[:-2]
+            if selected_code.isdigit() and len(selected_code) == 8
+            else selected_code
+        )
+    request_product_query(selected_codes[0], sankey_prefix, selected_codes)
     return True
 
 
@@ -128,6 +147,30 @@ st.markdown(
     section[data-testid="stSidebar"] label,
     section[data-testid="stSidebar"] p {
         color: var(--paper);
+    }
+
+    section[data-testid="stSidebar"] h2 {
+        font-size: 1.5rem;
+        margin: 0 0 0.5rem 0;
+    }
+
+    section[data-testid="stSidebar"] [class*="st-key-remove-query-class"] button {
+        width: 100%;
+        min-width: 2.6rem;
+        min-height: 2.6rem;
+        padding: 0.25rem;
+        background: var(--muted-ink) !important;
+        border: 2px solid var(--muted-ink) !important;
+        color: var(--ink) !important;
+        font-size: 1.25rem;
+        font-weight: 800;
+    }
+
+    section[data-testid="stSidebar"] [class*="st-key-remove-query-class"] button:hover {
+        background: var(--muted-ink) !important;
+        border-color: var(--muted-ink) !important;
+        color: var(--ink) !important;
+        transform: scale(1.06);
     }
 
     section[data-testid="stSidebar"] [data-testid="stWidgetLabel"] p,
@@ -226,6 +269,45 @@ st.title("𓅋 Haitem • Trade & procurement flows of Finland")
 
 with st.sidebar:
     st.header("Query")
+    selected_query_codes = st.session_state.get("selectedProductClasses", [])
+    for selected_query_code in selected_query_codes:
+        classification_labels = st.session_state.get(
+            "product_classification_labels", {}
+        )
+        selected_query_label = classification_labels.get(
+            len(selected_query_code), {}
+        ).get(selected_query_code)
+        previous_result = st.session_state.get("uljas_result")
+        if not selected_query_label and previous_result:
+            previous_products = previous_result[3]
+            matching_product = previous_products.loc[
+                previous_products["Product code"].astype(str).eq(selected_query_code),
+                "Product",
+            ]
+            if not matching_product.empty:
+                selected_query_label = matching_product.iloc[0]
+        with st.container(border=True):
+            category_column, remove_column = st.columns([3, 1])
+            category_column.markdown(
+                f"<span style='color:#D27A37;font-weight:800'>"
+                f"{format_cn_code(selected_query_code)}</span>",
+                unsafe_allow_html=True,
+            )
+            category_column.caption(
+                selected_query_label or "Selected product class"
+            )
+            if remove_column.button(
+                "×",
+                key=f"remove-query-class-{selected_query_code}",
+                help=f"Remove {format_cn_code(selected_query_code)} from the query.",
+            ):
+                remaining_codes = [
+                    code
+                    for code in selected_query_codes
+                    if code != selected_query_code
+                ]
+                request_product_query("", "", remaining_codes)
+                st.rerun()
     with st.form("uljas-query"):
         country = st.text_input(
             "Partner country code (ISO-2)", value="", placeholder="e.g. SE"
@@ -244,11 +326,11 @@ with st.sidebar:
         )
         submitted = st.form_submit_button("Load statistics", type="primary")
     st.caption(
-        "Data loads on submit or when a product class is selected. Identical "
+        "Data loads on submit or when product classes are selected. Identical "
         "requests are cached for 1 hour."
     )
 
-pending_product_query = "pending_product_prefix" in st.session_state
+pending_product_query = "pending_product_prefixes" in st.session_state
 if submitted or pending_product_query:
     bump_chart_versions()
     load_status = st.empty()
@@ -256,19 +338,20 @@ if submitted or pending_product_query:
         if not country:
             raise ValueError("Enter a partner country code (ISO-2).")
         if submitted:
-            query_prefix = ""
-            st.session_state.pop("pending_product_prefix", None)
-            st.session_state["selectedProductClass"] = None
+            query_prefixes = ()
+            st.session_state.pop("pending_product_prefixes", None)
+            st.session_state["selectedProductClasses"] = []
             st.session_state["sankey_prefix"] = ""
             st.session_state["sankey_depth"] = 0
         else:
-            query_prefix = st.session_state.pop("pending_product_prefix")
+            query_prefixes = st.session_state.pop("pending_product_prefixes")
         st.session_state.pop("uljas_result", None)
-        classification_id, product_codes = product_query_for_prefix(query_prefix)
+        classification_id, product_codes = product_query_for_codes(query_prefixes)
+        query_prefix = query_prefixes[0] if len(query_prefixes) == 1 else ""
         query_scope = (
-            "all product classes"
-            if not query_prefix
-            else f"descendants of {format_cn_code(query_prefix)}"
+            f"the selected {len(query_prefixes):,} product classes"
+            if query_prefixes
+            else "all product classes"
         )
         load_status.caption(f"Querying {query_scope} from ULJAS...")
         result = load_data(
@@ -334,8 +417,11 @@ else:
         first_period = timeline["Date"].min().strftime(date_format)
         last_period = timeline["Date"].max().strftime(date_format)
         active_product_prefix = st.session_state.get("active_product_prefix", "")
+        selected_scope_codes = st.session_state.get("selectedProductClasses", [])
         product_scope = (
-            f"{format_cn_code(active_product_prefix)} and descendants"
+            f"{len(selected_scope_codes):,} selected product classes"
+            if len(selected_scope_codes) > 1
+            else f"{format_cn_code(active_product_prefix)} and descendants"
             if active_product_prefix
             else "all product classes"
         )
@@ -404,27 +490,15 @@ else:
             clicked_category_code = selected_sankey_code(
                 clicked_points, category_codes
             )
-            if (
-                clicked_category_code
-                and str(clicked_category_code)
-                != st.session_state.get("selectedProductClass")
-            ):
-                sankey_code = str(clicked_category_code)
-                sankey_path = (
-                    sankey_code[:-2]
-                    if len(sankey_code) == 8
-                    else sankey_code
-                )
-                request_product_query(
-                    sankey_code, sankey_path, sankey_code
-                )
+            if navigate_to_product_classes(clicked_category_code):
                 st.rerun()
             st.caption(
                 "Flow widths show recorded customs trade value, not money transfers. "
                 "Hover a node or band for its full product name; click a code node "
                 "or flow band to drill down. "
-                "The 8 largest visible positive categories are shown individually; "
-                "remaining positive categories are grouped as non-clickable Other."
+                "The 8 largest visible positive product classes are shown "
+                "individually; remaining product classes are grouped as "
+                "non-clickable Other."
             )
 
         if sankey_prefix:
@@ -440,7 +514,7 @@ else:
                 f"{frequency.title()} trade value · {format_cn_code(sankey_prefix)}"
             )
             if selected_timeline.empty:
-                st.info("No time-series values are available for this category.")
+                st.info("No time-series values are available for this product class.")
             else:
                 st.line_chart(
                     selected_timeline,
@@ -460,7 +534,7 @@ else:
             .to_dict()
         )
         selected_class_codes = st.multiselect(
-            "Product classes to show",
+            "Product classes to display",
             options=product_class_codes,
             default=product_class_codes[: min(40, len(product_class_codes))],
             format_func=lambda code: (
@@ -471,24 +545,45 @@ else:
                 f"{start}-{end}-{hash(tuple(product_class_codes))}"
             ),
         )
+        if selected_class_codes and st.button(
+            "Query selected product classes",
+            key="query-selected-product-classes",
+            help="Load the union of the selected CN classes in all charts.",
+        ):
+            request_product_query(
+                selected_class_codes[0], "", selected_class_codes
+            )
+            st.rerun()
         selected_products = all_products.loc[
             all_products["Product code"].astype(str).isin(selected_class_codes)
-        ]
+        ].copy()
+        selected_products["Product code"] = selected_products["Product code"].astype(
+            str
+        )
+        selected_products["CN code"] = selected_products["Product code"].map(
+            format_cn_code
+        )
+        selected_products["CN group"] = selected_products["Product code"].str[:2].map(
+            format_cn_code
+        )
+        selected_group_count = selected_products["CN group"].nunique()
         with product_chart_column:
-            st.subheader("Selected product classes")
+            st.subheader("Product classes · 2-digit groups")
             st.caption(
-                f"Showing {len(selected_products):,} of {len(all_products):,} classes. "
-                "Hover for the full name; select a bar to load its time series."
+                f"Showing {len(selected_class_codes):,} selected classes across "
+                f"{selected_group_count:,} groups. Each bar is grouped by its "
+                "two-digit code and stacked by product class; select a segment "
+                "to load its time series."
             )
-            if st.session_state.get("selectedProductClass"):
+            if st.session_state.get("selectedProductClasses"):
                 if st.button(
-                    "Clear product selection", key="clear-product-selection"
+                    "Clear selected product classes", key="clear-product-selection"
                 ):
                     request_product_query("", "", None)
                     st.rerun()
         product_selection = alt.selection_point(
             fields=["Product code"],
-            name="cn8_bar_selection",
+            name="product_class_bar_selection",
             clear=False,
             toggle=False,
         )
@@ -501,22 +596,31 @@ else:
             alt.Chart(
                 selected_products.assign(
                     **{
-                        "CN code": selected_products["Product code"]
-                        .astype(str)
-                        .map(format_cn_code),
-                        "Selected": selected_products["Product code"]
-                        .astype(str)
-                        .eq(str(st.session_state.get("selectedProductClass"))),
+                        "Selected": selected_products["Product code"].map(
+                            lambda code: any(
+                                code.startswith(selected_code)
+                                for selected_code in st.session_state.get(
+                                    "selectedProductClasses", []
+                                )
+                            )
+                        ),
                     }
                 )
             )
             .mark_bar(orient="horizontal", cursor="pointer")
             .encode(
-                x=alt.X("Value (EUR):Q", title="Value (EUR)", scale=alt.Scale(zero=True)),
+                x=alt.X(
+                    "Value (EUR):Q",
+                    title="Value (EUR)",
+                    scale=alt.Scale(zero=True),
+                    stack="zero",
+                ),
                 y=alt.Y(
-                    "CN code:N",
-                    sort="-x",
-                    axis=alt.Axis(title="CN code"),
+                    "CN group:N",
+                    sort=alt.EncodingSortField(
+                        field="Value (EUR)", op="sum", order="descending"
+                    ),
+                    axis=alt.Axis(title="2-digit CN group"),
                 ),
                 color=alt.condition(
                     alt.datum.Selected,
@@ -529,12 +633,14 @@ else:
                 ),
                 opacity=alt.condition(bar_hover, alt.value(1), alt.value(0.82)),
                 tooltip=[
-                    alt.Tooltip("Product:N", title="product class"),
-                    alt.Tooltip("CN code:N", title="CN code"),
+                    alt.Tooltip("Product:N", title="Product class"),
+                    alt.Tooltip("CN code:N", title="Product class code"),
                     alt.Tooltip("Value (EUR):Q", format=",.0f"),
                 ],
             )
-            .properties(height=min(900, max(420, 20 * len(selected_products) + 50)))
+            .properties(
+                height=min(900, max(420, 40 * selected_group_count + 50))
+            )
             .add_params(product_selection)
             .add_params(bar_hover)
             .interactive()
@@ -557,20 +663,26 @@ else:
                     f"{hash(tuple(selected_class_codes))}"
                 ),
                 on_select="rerun",
-                selection_mode="cn8_bar_selection",
+                selection_mode="product_class_bar_selection",
             )
-        clicked_product_code = selected_product_code(chart_event.selection)
-        if navigate_to_product_class(clicked_product_code):
+        clicked_product_codes = selected_product_codes(chart_event.selection)
+        if navigate_to_product_classes(clicked_product_codes):
             st.rerun()
 
         with licence_chart_column:
-            selected_product_class = st.session_state.get("selectedProductClass")
-            if not selected_product_class:
+            selected_product_classes = st.session_state.get(
+                "selectedProductClasses", []
+            )
+            if not selected_product_classes:
                 st.subheader("Plenary decisions")
                 st.info("Select a product class to view plenary decisions.")
             else:
                 st.subheader(
-                    f"Plenary decisions · {format_cn_code(str(selected_product_class))}"
+                    "Plenary decisions · "
+                    + ", ".join(
+                        format_cn_code(code)
+                        for code in selected_product_classes
+                    )
                 )
                 st.caption(
                     "Decision counts and sources cover the selected period; the "
@@ -708,15 +820,15 @@ else:
         st.subheader("Product class PCA")
         with st.container():
             st.write(
-                "Two-axis PCA summarizes how selected product-category customs "
-                "values move together over time. Periods are points; category "
-                "coordinates show their contribution to the axes. Values are "
-                "standardized by category so large categories do not dominate."
+                "Compare how selected product classes move together over time. "
+                "Period dots show customs-value profiles; labeled diamonds show "
+                "each product class's contribution to the axes."
             )
             st.write(
-                "This uses customs product categories, not procurement categories. "
+                "Values are standardized by product class so large classes do not "
+                "dominate. This uses customs data, not procurement data. "
                 "The available customs and exporter datasets do not link company "
-                "names to product categories or customs values."
+                "names to product classes or customs values."
             )
             pca_codes = product_class_codes
             pca_labels = (
@@ -727,7 +839,7 @@ else:
                 .to_dict()
             )
             selected_pca_codes = st.multiselect(
-                "Product categories",
+                "Product classes in PCA",
                 options=pca_codes,
                 default=selected_class_codes[: min(8, len(selected_class_codes))],
                 format_func=lambda code: (
@@ -752,7 +864,13 @@ else:
                 )
                 period_chart = (
                     alt.Chart(pca_scores)
-                    .mark_circle(size=100, color="#426D78")
+                    .mark_circle(
+                        size=100,
+                        filled=True,
+                        color="#426D78",
+                        stroke="#202629",
+                        strokeWidth=1,
+                    )
                     .encode(
                         x=alt.X(
                             "PC1:Q",
@@ -771,8 +889,22 @@ else:
                         ],
                     )
                 )
+                selected_product_classes = st.session_state.get(
+                    "selectedProductClasses", []
+                )
                 category_points = (
-                    alt.Chart(pca_categories)
+                    alt.Chart(
+                        pca_categories.assign(
+                            **{
+                                "Selected": pca_categories["Product code"].map(
+                                    lambda code: any(
+                                        str(code).startswith(selected_code)
+                                        for selected_code in selected_product_classes
+                                    )
+                                )
+                            }
+                        )
+                    )
                     .mark_point(
                         shape="diamond",
                         size=110,
@@ -782,27 +914,24 @@ else:
                     .encode(
                         x=alt.X("PC1:Q"),
                         y=alt.Y("PC2:Q"),
-                        color=alt.condition(
-                            alt.datum["Product code"]
-                            == st.session_state.get("selectedProductClass"),
+                        fill=alt.condition(
+                            alt.datum.Selected,
                             alt.value("#D27A37"),
                             alt.value("#333A3D"),
                         ),
                         size=alt.condition(
-                            alt.datum["Product code"]
-                            == st.session_state.get("selectedProductClass"),
+                            alt.datum.Selected,
                             alt.value(260),
                             alt.value(110),
                         ),
                         stroke=alt.condition(
-                            alt.datum["Product code"]
-                            == st.session_state.get("selectedProductClass"),
+                            alt.datum.Selected,
                             alt.value("#202629"),
                             alt.value("#333A3D"),
                         ),
                         tooltip=[
-                            alt.Tooltip("Product:N", title="Product category"),
-                            alt.Tooltip("Product code:N", title="Product code"),
+                            alt.Tooltip("Product:N", title="Product class"),
+                            alt.Tooltip("Product code:N", title="Product class code"),
                             alt.Tooltip("PC1:Q", title="PC1 coordinate", format=".3f"),
                             alt.Tooltip("PC2:Q", title="PC2 coordinate", format=".3f"),
                             alt.Tooltip(
@@ -812,20 +941,37 @@ else:
                             ),
                         ],
                     )
+                    .add_params(
+                        alt.selection_point(
+                            fields=["Product code"],
+                            name="product_class_bar_selection",
+                            clear=False,
+                            toggle=False,
+                        )
+                    )
                 )
                 category_labels = (
-                    alt.Chart(pca_categories)
+                    alt.Chart(
+                        pca_categories.assign(
+                            **{
+                                "CN code": pca_categories["Product code"].map(
+                                    format_cn_code
+                                )
+                            }
+                        )
+                    )
                     .mark_text(
                         align="left",
                         baseline="middle",
                         dx=7,
-                        fontSize=10,
+                        fontSize=11,
+                        fontWeight="bold",
                         color="#202629",
                     )
                     .encode(
                         x=alt.X("PC1:Q"),
                         y=alt.Y("PC2:Q"),
-                        text=alt.Text("Product code:N"),
+                        text=alt.Text("CN code:N"),
                     )
                 )
                 pca_chart = (
@@ -842,12 +988,25 @@ else:
                     )
                     .configure_view(stroke="#A9C0C8")
                 )
-                st.altair_chart(pca_chart, width="stretch")
+                pca_chart_event = st.altair_chart(
+                    pca_chart,
+                    width="stretch",
+                    key=(
+                        f"pca-product-classes-{country}-{flow}-{frequency}-"
+                        f"{start}-{end}-{hash(tuple(selected_pca_codes))}-"
+                        f"{hash(tuple(selected_product_classes))}"
+                    ),
+                    on_select="rerun",
+                    selection_mode="product_class_bar_selection",
+                )
+                clicked_pca_codes = selected_product_codes(pca_chart_event.selection)
+                if navigate_to_product_classes(clicked_pca_codes):
+                    st.rerun()
                 st.caption(
                     "Nearby periods have similar standardized customs-value "
-                    "profiles. Category coordinates indicate association with "
-                    "each axis; they are not company-level observations. The "
-                    "confidence score is cos²: the share of category variation "
+                    "profiles. Product-class coordinates indicate association "
+                    "with each axis; they are not company-level observations. "
+                    "The confidence score is cos²: the share of product-class variation "
                     "represented by the displayed two components, not statistical "
                     "certainty. High 🟢 means over 90% representation."
                 )
@@ -874,16 +1033,16 @@ else:
                         "Assessment": st.column_config.TextColumn("Assessment"),
                     },
                     on_select="rerun",
-                    selection_mode="single-row",
+                    selection_mode="multi-row",
                     key=(
-                        f"pca-category-table-{country}-{flow}-{frequency}-"
+                        f"pca-product-class-table-{country}-{flow}-{frequency}-"
                         f"{start}-{end}-{hash(tuple(selected_pca_codes))}"
                     ),
                 )
-                pca_table_product_code = selected_table_product_code(
+                pca_table_product_codes = selected_table_product_codes(
                     pca_table_selection.selection, pca_table
                 )
-                if navigate_to_product_class(pca_table_product_code):
+                if navigate_to_product_classes(pca_table_product_codes):
                     st.rerun()
 
         if not sankey_prefix:

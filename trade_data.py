@@ -38,30 +38,36 @@ def load_product_classification_codes(classification_id):
 
 
 def product_query_for_prefix(prefix):
-    """Return the next deeper ULJAS classification and matching category codes."""
-    prefix = str(prefix)
-    if not prefix:
+    """Return the next deeper ULJAS classification and matching product classes."""
+    return product_query_for_codes((prefix,) if prefix else ())
+
+
+def product_query_for_codes(prefixes):
+    """Return one classification containing descendants of all selected CN codes."""
+    prefixes = tuple(dict.fromkeys(str(prefix) for prefix in prefixes if prefix))
+    if not prefixes:
         return 1, ()
-    if not prefix.isdigit():
-        return 1, (prefix,)
 
-    next_level = {
-        2: (3, 4),
-        4: (2, 6),
-        6: (1, 8),
-        8: (1, 8),
-    }.get(len(prefix))
-    if next_level is None:
-        raise ValueError("Product category navigation must use 2-digit levels.")
+    if any(not prefix.isdigit() for prefix in prefixes):
+        if len(prefixes) == 1:
+            return 1, prefixes
+        raise ValueError("Multiple product classes must use numeric CN codes.")
 
-    classification_id, target_code_length = next_level
+    target_code_length = max(min(len(prefix) + 2, 8) for prefix in prefixes)
+    classification_id = {4: 3, 6: 2, 8: 1}.get(target_code_length)
+    if classification_id is None:
+        raise ValueError("Product class navigation must use 2-digit CN levels.")
     product_codes = tuple(
         code
         for code in load_product_classification_codes(classification_id)
-        if len(code) == target_code_length and code.startswith(prefix)
+        if len(code) == target_code_length
+        and any(code.startswith(prefix) for prefix in prefixes)
     )
     if not product_codes:
-        raise ValueError(f"No deeper product classes found under CN {prefix}.")
+        formatted_prefixes = ", ".join(format_cn_code(prefix) for prefix in prefixes)
+        raise ValueError(
+            f"No deeper product classes found under {formatted_prefixes}."
+        )
     return classification_id, product_codes
 
 
@@ -112,14 +118,19 @@ def format_cn_code(code):
     return f"CN {code}"
 
 
-def selected_product_code(selection):
-    selected_items = selection.get("cn8_bar_selection", [])
-    if not selected_items:
-        return None
-    return selected_items[0].get("Product code")
+def selected_product_codes(selection):
+    selected_items = selection.get("product_class_bar_selection", [])
+    return [
+        str(item["Product code"])
+        for item in selected_items
+        if item.get("Product code") is not None
+    ]
 
 
-def selected_table_product_code(selection, products):
+def selected_table_product_codes(selection, products):
     if not selection.rows:
-        return None
-    return str(products.iloc[selection.rows[0]]["Product code"])
+        return []
+    return [
+        str(products.iloc[row]["Product code"])
+        for row in selection.rows
+    ]

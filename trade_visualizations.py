@@ -85,7 +85,7 @@ def make_trade_sankey(
     if not remaining_products.empty:
         visible_products.loc[len(visible_products)] = {
             "Drill code": None,
-            "Product": f"Other products ({len(remaining_products):,} categories)",
+            "Product": f"Other product classes ({len(remaining_products):,})",
             "Value (EUR)": remaining_products["Value (EUR)"].sum(),
         }
 
@@ -99,7 +99,7 @@ def make_trade_sankey(
         None if pd.isna(code) else code for code in visible_products["Drill code"]
     ]
     category_full_names = [
-        str(name) if code is not None else "Combined remaining product categories"
+        str(name) if code is not None else "Combined remaining product classes"
         for code, name in zip(category_codes, visible_products["Product"])
     ]
     category_count = len(category_labels)

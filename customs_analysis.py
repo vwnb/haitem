@@ -1,21 +1,21 @@
-"""Analysis helpers for customs product-category time series."""
+"""Analysis helpers for customs product-class time series."""
 
 import numpy as np
 import pandas as pd
 
 
 def make_customs_pca(details, product_codes):
-    """Return period scores, category coordinates, and explained variance for a PCA biplot."""
+    """Return period scores, product-class coordinates, and explained variance."""
     selected_codes = tuple(dict.fromkeys(str(code) for code in product_codes))
     if len(selected_codes) < 2:
-        raise ValueError("Select at least two product categories.")
+        raise ValueError("Select at least two product classes.")
 
     selected = details.loc[
         details["Product code"].astype(str).isin(selected_codes),
         ["Date", "Product code", "Product", "Value (EUR)"],
     ].copy()
     if selected.empty:
-        raise ValueError("No customs values are available for the selected categories.")
+        raise ValueError("No customs values are available for the selected product classes.")
     selected["Product code"] = selected["Product code"].astype(str)
 
     values = (
@@ -39,7 +39,7 @@ def make_customs_pca(details, product_codes):
     values = values.loc[:, variable_categories]
     standard_deviations = standard_deviations.loc[variable_categories]
     if values.shape[1] < 2:
-        raise ValueError("At least two selected categories must vary over time.")
+        raise ValueError("At least two selected product classes must vary over time.")
 
     standardized = (values - values.mean(axis=0)) / standard_deviations
     left_vectors, singular_values, right_vectors = np.linalg.svd(
