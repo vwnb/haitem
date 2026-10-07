@@ -60,6 +60,14 @@ class UljasClient:
             if member.get("code") is not None and member.get("label") is not None
         }
 
+    def product_classification_codes(self, classification_id):
+        classification = self._get_classification(classification_id)
+        return tuple(
+            str(member["code"])
+            for member in classification.get("classes", [])
+            if member.get("code") is not None
+        )
+
     def _find_member(self, classification_ids, code):
         for classification_id in classification_ids:
             classification = self._get_classification(classification_id)

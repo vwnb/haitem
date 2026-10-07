@@ -43,6 +43,7 @@ def make_trade_sankey(
     destination,
     classification_labels,
     parent_code="",
+    zoom_depth=0,
 ):
     codes = products["Product code"].astype(str)
     valid_codes = codes.str.fullmatch(r"\d{2,8}")
@@ -57,7 +58,7 @@ def make_trade_sankey(
     if pd.isna(max_depth) or max_depth <= len(parent_code):
         return None
 
-    depth = min(len(parent_code) + 2, int(max_depth))
+    depth = min((zoom_depth + 1) * 2, int(max_depth))
     trade_products["Drill code"] = trade_products["Product code"].str.slice(0, depth)
     cn8_labels = trade_products.drop_duplicates("Product code").set_index(
         "Product code"
@@ -183,7 +184,24 @@ def selected_sankey_code(clicked_points, category_codes):
         return None
 
     point = clicked_points[0]
-    if point.get("curveNumber") != 0 or "source" in point or "target" in point:
+    if point.get("curveNumber") != 0:
+        return None
+
+    if "source" in point or "target" in point:
+        source = point.get("source")
+        target = point.get("target")
+        category_node = (
+            target
+            if source == 0
+            else source
+            if target == len(category_codes) + 1
+            else None
+        )
+        if (
+            isinstance(category_node, int)
+            and 1 <= category_node <= len(category_codes)
+        ):
+            return category_codes[category_node - 1]
         return None
 
     custom_code = point.get("customdata")

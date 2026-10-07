@@ -69,6 +69,10 @@ def make_customs_pca(details, product_codes):
             "Product": category_labels.to_numpy(),
             "PC1": right_vectors[0, :] * singular_values[0] / np.sqrt(len(values) - 1),
             "PC2": right_vectors[1, :] * singular_values[1] / np.sqrt(len(values) - 1),
+            "Confidence": (
+                (right_vectors[:2, :] ** 2).T @ variances[:2]
+            )
+            / ((right_vectors**2).T @ variances),
         }
     )
     return scores, category_coordinates, explained_variance[:2]

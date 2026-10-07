@@ -31,6 +31,40 @@ def load_product_classification_labels():
     }
 
 
+@st.cache_data(ttl=3600, max_entries=3, show_spinner=False)
+def load_product_classification_codes(classification_id):
+    client = UljasClient()
+    return client.product_classification_codes(classification_id)
+
+
+def product_query_for_prefix(prefix):
+    """Return the next deeper ULJAS classification and matching category codes."""
+    prefix = str(prefix)
+    if not prefix:
+        return 1, ()
+    if not prefix.isdigit():
+        return 1, (prefix,)
+
+    next_level = {
+        2: (3, 4),
+        4: (2, 6),
+        6: (1, 8),
+        8: (1, 8),
+    }.get(len(prefix))
+    if next_level is None:
+        raise ValueError("Product category navigation must use 2-digit levels.")
+
+    classification_id, target_code_length = next_level
+    product_codes = tuple(
+        code
+        for code in load_product_classification_codes(classification_id)
+        if len(code) == target_code_length and code.startswith(prefix)
+    )
+    if not product_codes:
+        raise ValueError(f"No deeper product classes found under CN {prefix}.")
+    return classification_id, product_codes
+
+
 def make_dataframes(result, frequency):
     products = result["variables"]["0"]["items"]
     periods = result["variables"]["1"]["items"]
@@ -70,16 +104,12 @@ def make_dataframes(result, frequency):
 
 
 def format_cn_code(code):
-    return f"CN {str(code)[:2]}"
-
-
-def parse_product_codes(raw_codes):
-    codes = tuple(
-        sorted({code.strip().upper() for code in raw_codes.split(",") if code.strip()})
-    )
-    if len(codes) > 10:
-        raise ValueError("Enter at most 10 CN8 product codes per query.")
-    return codes
+    code = str(code)
+    if code.isdigit():
+        return "CN " + " ".join(
+            code[index : index + 2] for index in range(0, len(code), 2)
+        )
+    return f"CN {code}"
 
 
 def selected_product_code(selection):
