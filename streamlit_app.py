@@ -1,11 +1,23 @@
+import colorsys
+import json
+import zlib
+from pathlib import Path
+
 import altair as alt
 import pandas as pd
 import plotly.graph_objects as go
 import requests
 import streamlit as st
-from streamlit_plotly_events import plotly_events
+import streamlit.components.v1 as components
+import streamlit_plotly_events
 
 from index import DEFAULT_CUBE_ID, UljasClient
+
+
+_plotly_event_component = components.declare_component(
+    "haitem_plotly_events",
+    path=Path(streamlit_plotly_events.__file__).parent / "frontend" / "build",
+)
 
 
 @st.cache_data(ttl=3600, max_entries=8, show_spinner=False)
@@ -70,6 +82,29 @@ def make_dataframes(result, frequency):
     )
     return timeline, all_products.head(33), all_products, details
 
+def format_cn_code(code):
+    return f"CN {str(code)[:2]}"
+
+
+def sankey_plotly_events(figure, key):
+    plot_object = json.loads(figure.to_json())
+    plot_object["config"] = {
+        "displayModeBar": False,
+        "displaylogo": False,
+        "responsive": True,
+    }
+    component_value = _plotly_event_component(
+        plot_obj=json.dumps(plot_object),
+        override_height=figure.layout.height,
+        override_width="100%",
+        click_event=True,
+        select_event=False,
+        hover_event=False,
+        key=key,
+        default="[]",
+    )
+    return json.loads(component_value)
+
 
 def make_trade_sankey(
     products,
@@ -123,11 +158,17 @@ def make_trade_sankey(
         }
 
     category_labels = [
-        row["Product"] if pd.isna(row["Drill code"]) else str(row["Drill code"])
+        row["Product"]
+        if pd.isna(row["Drill code"])
+        else format_cn_code(row["Drill code"])
         for _, row in visible_products.iterrows()
     ]
     category_codes = [
         None if pd.isna(code) else code for code in visible_products["Drill code"]
+    ]
+    category_full_names = [
+        str(name) if code is not None else "Combined remaining product categories"
+        for code, name in zip(category_codes, visible_products["Product"])
     ]
     category_count = len(category_labels)
     values = visible_products["Value (EUR)"].tolist()
@@ -151,14 +192,18 @@ def make_trade_sankey(
             arrangement="snap",
             node={
                 "label": [source, *category_labels, destination],
-                "color": ["#333a3d", *["#a9c0c8"] * category_count, "#426d78"],
+                "color": ["#333a3d", *["#426d78"] * category_count, "#426d78"],
                 "line": {"color": "#333a3d", "width": 0.5},
                 "pad": 10,
                 "thickness": 14,
                 "x": [0.02, *[0.5] * category_count, 0.98],
                 "y": [0.02, *category_top_positions, 0.02],
-                "customdata": [None, *category_codes, None],
-                "hovertemplate": "%{label}<extra></extra>",
+                "customdata": [
+                    source,
+                    *category_full_names,
+                    destination,
+                ],
+                "hovertemplate": "%{label}<br>%{customdata}<extra></extra>",
             },
             link={
                 "source": [0] * category_count
@@ -166,9 +211,24 @@ def make_trade_sankey(
                 "target": list(range(1, category_count + 1))
                 + [category_count + 1] * category_count,
                 "value": values + values,
-                "color": ["rgba(66, 109, 120, 0.38)"] * (2 * category_count),
+                "color": ["rgba(66, 109, 120, 0.76)"]
+                * category_count
+                + ["rgba(66, 109, 120, 0.76)"]
+                * category_count,
+                "customdata": [
+                    [label, name]
+                    for label, name in zip(category_labels, category_full_names)
+                ]
+                * 2,
+                "hovercolor": [
+                    "rgba(66, 109, 120, 0.76)",
+                ]
+                * category_count
+                + ["rgba(66, 109, 120, 0.76)"]
+                * category_count,
                 "hovertemplate": (
                     "%{source.label} → %{target.label}<br>"
+                    "%{customdata[0]} · %{customdata[1]}<br>"
                     "Recorded trade value: €%{value:,.0f}<extra></extra>"
                 ),
             },
@@ -178,6 +238,11 @@ def make_trade_sankey(
         height=max(plot_height, 30 * category_count + 40),
         margin={"l": 80, "r": 80, "t": 16, "b": 16},
         font={"family": "Arial, sans-serif", "size": 12, "color": "#202629"},
+        hoverlabel={
+            "bgcolor": "#f2f4f5",
+            "bordercolor": "#426d78",
+            "font": {"family": "Arial, sans-serif", "color": "#202629"},
+        },
     )
     return figure, total_value, category_codes, category_labels
 
@@ -216,6 +281,12 @@ def selected_product_code(selection):
     return selected_items[0].get("Product code")
 
 
+def selected_table_product_code(selection, products):
+    if not selection.rows:
+        return None
+    return str(products.iloc[selection.rows[0]]["Product code"])
+
+
 st.set_page_config(page_title="Haitem • trade & economic metrics", page_icon="📊", layout="wide")
 st.markdown(
     """
@@ -252,9 +323,13 @@ st.markdown(
 
     h1, h2, h3 {
         color: var(--ink);
-        font-family: Arial, Helvetica, sans-serif !important;
-        font-weight: 850 !important;
+        font-family: Arial, Helvetica, sans-serif;
+        font-weight: 850;
         margin: 2rem 0 1rem 0;
+    }
+
+    h1 {
+        font-size: 3em;
     }
 
     [data-testid="stCaptionContainer"] p,
@@ -325,6 +400,27 @@ st.markdown(
         border-color: var(--cyan) !important;
         transform: skew(-10deg, 0);
         transition: transform 0.3s ease-in-out;
+    }
+
+    div[data-testid="stButton"] button {
+        transition: background-color 0.16s ease, color 0.16s ease, transform 0.16s ease;
+    }
+
+    div[data-testid="stButton"] button:hover {
+        background: var(--cyan) !important;
+        color: var(--paper) !important;
+        border-color: var(--cyan) !important;
+        transform: translateY(-1px);
+    }
+
+    .st-key-all-product-classes-table [data-testid="stDataFrame"] {
+        cursor: pointer;
+        transition: border-color 0.16s ease, box-shadow 0.16s ease;
+    }
+
+    .st-key-all-product-classes-table:hover [data-testid="stDataFrame"] {
+        border-color: var(--cyan) !important;
+        box-shadow: 0 0 0 2px #426d7826;
     }
 
     div[data-testid="stMetric"] {
@@ -471,11 +567,10 @@ else:
         st.subheader(f"Trade flow · {source} → {destination}")
         sankey_prefix = st.session_state.get("sankey_prefix", "")
         if sankey_prefix:
-            path = " → ".join(
-                f"CN {sankey_prefix[:depth]}"
-                for depth in range(2, len(sankey_prefix) + 1, 2)
+            st.caption(
+                f"Breakdown path: {source} → {format_cn_code(sankey_prefix)} "
+                f"→ {destination}"
             )
-            st.caption(f"Breakdown path: {source} → {path} → {destination}")
             back_column, reset_column = st.columns(2)
             with back_column:
                 if st.button("Back one level", key="sankey-back"):
@@ -511,7 +606,8 @@ else:
         if trade_sankey is None:
             if sankey_prefix:
                 st.info(
-                    f"CN {sankey_prefix} is at the most detailed level available. "
+                    f"{format_cn_code(sankey_prefix)} is at the most detailed "
+                    "level available. "
                     "Its time series is shown below."
                 )
             else:
@@ -522,12 +618,8 @@ else:
         else:
             figure, represented_value, category_codes, _ = trade_sankey
             st.metric("Positive trade value shown", f"€{represented_value:,.0f}")
-            clicked_points = plotly_events(
+            clicked_points = sankey_plotly_events(
                 figure,
-                click_event=True,
-                select_event=False,
-                hover_event=False,
-                override_height=figure.layout.height,
                 key=(
                     f"trade-sankey-{sankey_prefix or 'root'}-"
                     f"{st.session_state.get('sankey_chart_version', 0)}"
@@ -549,7 +641,8 @@ else:
                 st.rerun()
             st.caption(
                 "Flow widths show recorded customs trade value, not money transfers. "
-                "Click a product node to drill down into its next code level. "
+                "Hover a node or band for its full product name; click a code node "
+                "to drill down. "
                 "The 8 largest visible positive categories are shown individually; "
                 "remaining positive categories are grouped as non-clickable Other."
             )
@@ -563,7 +656,9 @@ else:
                 .sum()
                 .sort_values("Date")
             )
-            st.subheader(f"{frequency.title()} trade value · CN {sankey_prefix}")
+            st.subheader(
+                f"{frequency.title()} trade value · {format_cn_code(sankey_prefix)}"
+            )
             if selected_timeline.empty:
                 st.info("No time-series values are available for this category.")
             else:
@@ -585,72 +680,81 @@ else:
         else:
             st.caption(
                 f"Showing {len(top_products):,} of {len(all_products):,} categories. "
-                "Click a bar "
-                "to load its time series; hover "
-                "to see its full category name."
+                "Hover a bar to highlight it and see its full name; click to load "
+                "its time series."
             )
-        left, right = st.columns([3, 2])
-        with left:
-            chart_version = st.session_state.get("product_chart_version", 0)
-            if st.session_state.get("selected_cn8_code"):
-                if st.button("Clear product selection", key="clear-cn8-selection"):
-                    st.session_state.pop("selected_cn8_series", None)
-                    st.session_state.pop("selected_cn8_code", None)
-                    st.session_state["product_chart_version"] = chart_version + 1
-                    chart_version += 1
-            product_selection = alt.selection_point(
-                fields=["Product code"],
-                name="cn8_bar_selection",
-                clear="dblclick",
-                toggle=False,
-            )
-            product_chart = (
-                alt.Chart(top_products)
-                .mark_bar()
-                .encode(
-                    x=alt.X("Value (EUR):Q", title="Value (EUR)", scale=alt.Scale(zero=True)),
-                    y=alt.Y("Product code:N", sort="-x", title="CN code"),
-                    tooltip=[
-                        alt.Tooltip("Product:N", title="product class"),
-                        alt.Tooltip("Product code:N", title="CN code"),
-                        alt.Tooltip("Value (EUR):Q", format=",.0f"),
-                    ],
-                )
-                .add_params(product_selection)
-                .interactive()
-                .configure_axis(
-                    labelColor="#333A3D",
-                    titleColor="#333A3D",
-                    gridColor="#A9C0C866",
-                    domainColor="#A9C0C8",
-                    labelFont="Arial",
-                    titleFont="Arial",
-                )
-                .configure_view(stroke="#A9C0C8")
-            )
-            chart_event = st.altair_chart(
-                product_chart,
-                width="stretch",
-                key=f"product-category-chart-{chart_version}",
-                on_select="rerun",
-                selection_mode="cn8_bar_selection",
-            )
-            clicked_product_code = selected_product_code(chart_event.selection)
-            if clicked_product_code != st.session_state.get("selected_cn8_code"):
-                st.session_state["selected_cn8_code"] = clicked_product_code
+        chart_version = st.session_state.get("product_chart_version", 0)
+        if st.session_state.get("selected_cn8_code"):
+            if st.button("Clear product selection", key="clear-cn8-selection"):
                 st.session_state.pop("selected_cn8_series", None)
-                if clicked_product_code:
-                    st.session_state.pop("sankey_prefix", None)
-                    st.session_state["sankey_chart_version"] = (
-                        st.session_state.get("sankey_chart_version", 0) + 1
-                    )
-        with right:
-            st.dataframe(
-                top_products,
-                hide_index=True,
-                width="stretch",
-                height=min(400, 30 * len(top_products) + 40)
+                st.session_state.pop("selected_cn8_code", None)
+                st.session_state["product_chart_version"] = chart_version + 1
+                chart_version += 1
+        product_selection = alt.selection_point(
+            fields=["Product code"],
+            name="cn8_bar_selection",
+            clear="dblclick",
+            toggle=False,
+        )
+        bar_hover = alt.selection_point(
+            fields=["Product code"],
+            on="pointerover",
+            clear="pointerout",
+        )
+        product_chart = (
+            alt.Chart(
+                top_products.assign(
+                    **{
+                        "CN code": top_products["Product code"]
+                        .astype(str)
+                        .map(format_cn_code)
+                    }
+                )
             )
+            .mark_bar(orient="horizontal", cursor="pointer")
+            .encode(
+                x=alt.X("Value (EUR):Q", title="Value (EUR)", scale=alt.Scale(zero=True)),
+                y=alt.Y(
+                    "CN code:N",
+                    sort="-x",
+                    axis=alt.Axis(title="CN code"),
+                ),
+                opacity=alt.condition(bar_hover, alt.value(1), alt.value(0.82)),
+                tooltip=[
+                    alt.Tooltip("Product:N", title="product class"),
+                    alt.Tooltip("CN code:N", title="CN code"),
+                    alt.Tooltip("Value (EUR):Q", format=",.0f"),
+                ],
+            )
+            .add_params(product_selection)
+            .add_params(bar_hover)
+            .interactive()
+            .configure_axis(
+                labelColor="#333A3D",
+                titleColor="#333A3D",
+                gridColor="#A9C0C866",
+                domainColor="#A9C0C8",
+                labelFont="Arial",
+                titleFont="Arial",
+            )
+            .configure_view(stroke="#A9C0C8")
+        )
+        chart_event = st.altair_chart(
+            product_chart,
+            width="stretch",
+            key=f"product-category-chart-{chart_version}",
+            on_select="rerun",
+            selection_mode="cn8_bar_selection",
+        )
+        clicked_product_code = selected_product_code(chart_event.selection)
+        if clicked_product_code != st.session_state.get("selected_cn8_code"):
+            st.session_state["selected_cn8_code"] = clicked_product_code
+            st.session_state.pop("selected_cn8_series", None)
+            if clicked_product_code:
+                st.session_state.pop("sankey_prefix", None)
+                st.session_state["sankey_chart_version"] = (
+                    st.session_state.get("sankey_chart_version", 0) + 1
+                )
 
         selected_code = st.session_state.get("selected_cn8_code")
         if selected_code:
@@ -665,7 +769,9 @@ else:
             cached_series = st.session_state.get("selected_cn8_series")
             if not cached_series or cached_series[0] != selection_signature:
                 try:
-                    with st.spinner(f"Loading CN8 {selected_code} time series..."):
+                    with st.spinner(
+                        f"Loading {format_cn_code(selected_code)} time series..."
+                    ):
                         series_result = load_data(
                             country,
                             flow,
@@ -682,17 +788,23 @@ else:
                     )
                     cached_series = st.session_state["selected_cn8_series"]
                 except (requests.RequestException, RuntimeError, ValueError) as error:
-                    st.error(f"Could not load CN8 {selected_code} time series: {error}")
+                    st.error(
+                        f"Could not load {format_cn_code(selected_code)} time series: "
+                        f"{error}"
+                    )
                     cached_series = None
             if cached_series:
                 _, series_frames = cached_series
                 series_timeline, _, series_products, _ = series_frames
                 if series_products.empty:
-                    st.warning(f"ULJAS returned no data for CN8 {selected_code}.")
+                    st.warning(
+                        f"ULJAS returned no data for {format_cn_code(selected_code)}."
+                    )
                 else:
                     selected_product = series_products.iloc[0]
                     st.subheader(
-                        f"{frequency.title()} time series · CN8 {selected_product['Product code']}"
+                        f"{frequency.title()} time series · "
+                        f"{format_cn_code(selected_product['Product code'])}"
                     )
                     st.caption(
                         f"{selected_product['Product']} · {flow} with {country} · "
@@ -708,15 +820,23 @@ else:
             st.subheader(f"{frequency.title()} trade value · selected CN8 products")
             st.caption("Each selected CN8 code is plotted as its own series.")
             time_series_chart = (
-                alt.Chart(details)
+                alt.Chart(
+                    details.assign(
+                        **{
+                            "CN code": details["Product code"]
+                            .astype(str)
+                            .map(format_cn_code)
+                        }
+                    )
+                )
                 .mark_line(point=True)
                 .encode(
                     x=alt.X("Date:T", title="Period"),
                     y=alt.Y("Value (EUR):Q", title="Value (EUR)"),
-                    color=alt.Color("Product code:N", title="CN8 code"),
+                    color=alt.Color("CN code:N", title="CN code"),
                     tooltip=[
                         alt.Tooltip("Product:N", title="Product"),
-                        alt.Tooltip("Product code:N", title="CN8 code"),
+                        alt.Tooltip("CN code:N", title="CN code"),
                         alt.Tooltip("Date:T", title="Period"),
                         alt.Tooltip("Value (EUR):Q", format=",.0f"),
                     ],
@@ -746,44 +866,40 @@ else:
             )
 
         with st.expander(f"All {len(all_products):,} product classes"):
-            st.caption(
-                "Scrollable table of every returned category, sorted by total "
-                "value for the selected period."
+            with st.container(key="all-product-classes-table"):
+                st.caption(
+                    "Select a row to view its time series. Categories are sorted by "
+                    "total value for the selected period."
+                )
+                table_selection = st.dataframe(
+                    all_products.assign(
+                        **{
+                            "Product code": all_products["Product code"]
+                            .astype(str)
+                            .map(format_cn_code)
+                        }
+                    ),
+                    hide_index=True,
+                    width="stretch",
+                    height=min(400, 30 * len(top_products) + 40),
+                    on_select="rerun",
+                    selection_mode="single-row",
+                    key=f"all-product-classes-{chart_version}",
+                )
+            table_product_code = selected_table_product_code(
+                table_selection.selection, all_products
             )
-            st.dataframe(
-                all_products,
-                hide_index=True,
-                width="stretch",
-                height=min(400, 30 * len(top_products) + 40),
-            )
-
-            st.markdown("**Copy a full category label**")
-            label_search = st.text_input(
-                "Find by CN code or product name",
-                key="product-label-search",
-            ).strip().casefold()
-            if len(label_search) < 2:
-                st.info("Enter at least two characters to search for a copyable label.")
-            else:
-                matching_products = all_products[
-                    all_products["Product code"].str.casefold().str.contains(
-                        label_search, regex=False
-                    )
-                    | all_products["Product"].str.casefold().str.contains(
-                        label_search, regex=False
-                    )
-                ]
-                st.caption(f"{len(matching_products):,} matching labels.")
-                if not matching_products.empty:
-                    selected_label = st.selectbox(
-                        "Select category",
-                        matching_products.apply(
-                            lambda row: f"{row['Product code']} — {row['Product']}",
-                            axis=1,
-                        ).tolist(),
-                        key="copyable-product-label",
-                    )
-                    st.code(selected_label, language=None)
+            if (
+                table_product_code
+                and table_product_code != st.session_state.get("selected_cn8_code")
+            ):
+                st.session_state["selected_cn8_code"] = table_product_code
+                st.session_state.pop("selected_cn8_series", None)
+                st.session_state.pop("sankey_prefix", None)
+                st.session_state["sankey_chart_version"] = (
+                    st.session_state.get("sankey_chart_version", 0) + 1
+                )
+                st.rerun()
 
         with st.expander("Raw data"):
             st.caption(f"ULJAS data version: {result['version']}")
@@ -791,7 +907,13 @@ else:
                 f"Showing all {len(details):,} product-period rows in a scrollable table."
             )
             st.dataframe(
-                details,
+                details.assign(
+                    **{
+                        "Product code": details["Product code"]
+                        .astype(str)
+                        .map(format_cn_code)
+                    }
+                ),
                 hide_index=True,
                 width="stretch",
                 height=min(400, 30 * len(top_products) + 40),
