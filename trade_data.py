@@ -1,0 +1,95 @@
+"""ULJAS query, transformation, and product-selection helpers."""
+
+import pandas as pd
+import streamlit as st
+
+from index import DEFAULT_CUBE_ID, UljasClient
+
+
+@st.cache_data(ttl=3600, max_entries=8, show_spinner=False)
+def load_data(country, flow, frequency, start, end, classification_id, product_codes):
+    client = UljasClient()
+    return client.query_trade(
+        country_code=country,
+        flow=flow,
+        start_period=start or None,
+        end_period=end or None,
+        frequency=frequency,
+        cube_id=DEFAULT_CUBE_ID,
+        product_classification_id=classification_id,
+        product_codes=list(product_codes) if product_codes else None,
+    )
+
+
+@st.cache_data(ttl=3600, max_entries=1, show_spinner=False)
+def load_product_classification_labels():
+    client = UljasClient()
+    return {
+        2: client.product_classification_labels(4),
+        4: client.product_classification_labels(5),
+        6: client.product_classification_labels(6),
+    }
+
+
+def make_dataframes(result, frequency):
+    products = result["variables"]["0"]["items"]
+    periods = result["variables"]["1"]["items"]
+    values = result["values"]
+    expected_values = len(products) * len(periods)
+    if len(values) != expected_values:
+        raise ValueError(
+            f"ULJAS returned {len(values)} values; expected {expected_values}."
+        )
+
+    records = []
+    for product_index, product in enumerate(products):
+        for period_index, period in enumerate(periods):
+            records.append(
+                {
+                    "Product code": product["code"],
+                    "Product": product["label"],
+                    "Period": period["code"],
+                    "Value (EUR)": values[product_index * len(periods) + period_index],
+                }
+            )
+
+    details = pd.DataFrame.from_records(records)
+    date_format = "%Y%m" if frequency == "month" else "%Y"
+    details["Date"] = pd.to_datetime(details["Period"], format=date_format)
+    timeline = (
+        details.groupby("Date", as_index=False)["Value (EUR)"]
+        .sum()
+        .sort_values("Date")
+    )
+    all_products = (
+        details.groupby(["Product code", "Product"], as_index=False)["Value (EUR)"]
+        .sum()
+        .sort_values("Value (EUR)", ascending=False)
+    )
+    return timeline, all_products.head(33), all_products, details
+
+
+def format_cn_code(code):
+    return f"CN {str(code)[:2]}"
+
+
+def parse_product_codes(raw_codes):
+    codes = tuple(
+        sorted({code.strip().upper() for code in raw_codes.split(",") if code.strip()})
+    )
+    if len(codes) > 10:
+        raise ValueError("Enter at most 10 CN8 product codes per query.")
+    return codes
+
+
+def selected_product_code(selection):
+    selected_items = selection.get("cn8_bar_selection", [])
+    if not selected_items:
+        return None
+    return selected_items[0].get("Product code")
+
+
+def selected_table_product_code(selection, products):
+    if not selection.rows:
+        return None
+    return str(products.iloc[selection.rows[0]]["Product code"])
