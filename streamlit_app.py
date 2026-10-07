@@ -1,9 +1,9 @@
-import re
 import altair as alt
 import pandas as pd
 import plotly.graph_objects as go
 import requests
 import streamlit as st
+from streamlit_plotly_events import plotly_events
 
 from index import DEFAULT_CUBE_ID, UljasClient
 
@@ -72,7 +72,11 @@ def make_dataframes(result, frequency):
 
 
 def make_trade_sankey(
-    products, source, destination, classification_labels, parent_code=""
+    products,
+    source,
+    destination,
+    classification_labels,
+    parent_code="",
 ):
     codes = products["Product code"].astype(str)
     valid_codes = codes.str.fullmatch(r"\d{2,8}")
@@ -119,42 +123,41 @@ def make_trade_sankey(
         }
 
     category_labels = [
-        (
-            row["Product"]
-            if pd.isna(row["Drill code"])
-            else (
-                re.sub(r"^\(\d{4}--(?:\d{4}|\.)\)\s*", "", row["Product"])
-                if row["Product"]
-                else "Product group"
-            )
-        )
+        row["Product"] if pd.isna(row["Drill code"]) else str(row["Drill code"])
         for _, row in visible_products.iterrows()
     ]
     category_codes = [
         None if pd.isna(code) else code for code in visible_products["Drill code"]
     ]
     category_count = len(category_labels)
-    category_positions = (
-        [0.5]
-        if category_count == 1
-        else [
-            0.02 + 0.96 * index / (category_count - 1)
-            for index in range(category_count)
-        ]
-    )
     values = visible_products["Value (EUR)"].tolist()
+    plot_height = 900
+    gap_fraction = min(10 / plot_height, 0.5 / category_count)
+    total_node_fraction = max(0.05, 1 - gap_fraction * (category_count - 1))
+    node_height_fractions = [
+        value / total_value * total_node_fraction for value in values
+    ]
+    remaining_fraction = 1 - sum(node_height_fractions) - gap_fraction * (
+        category_count - 1
+    )
+    cursor = max(0, remaining_fraction / 2)
+    category_top_positions = []
+    for node_height in node_height_fractions:
+        category_top_positions.append(cursor)
+        cursor += node_height + gap_fraction
 
     figure = go.Figure(
         go.Sankey(
-            arrangement="fixed",
+            arrangement="snap",
             node={
                 "label": [source, *category_labels, destination],
                 "color": ["#333a3d", *["#a9c0c8"] * category_count, "#426d78"],
                 "line": {"color": "#333a3d", "width": 0.5},
-                "pad": 16,
-                "thickness": 18,
+                "pad": 10,
+                "thickness": 14,
                 "x": [0.02, *[0.5] * category_count, 0.98],
-                "y": [0.5, *category_positions, 0.5],
+                "y": [0.02, *category_top_positions, 0.02],
+                "customdata": [None, *category_codes, None],
                 "hovertemplate": "%{label}<extra></extra>",
             },
             link={
@@ -171,38 +174,10 @@ def make_trade_sankey(
             },
         )
     )
-    figure.add_trace(
-        go.Scatter(
-            x=[0.5] * category_count,
-            y=category_positions,
-            mode="markers",
-            marker={"color": "rgba(0, 0, 0, 0.001)", "size": 30},
-            customdata=list(zip(category_codes, category_labels, values)),
-            hovertemplate=(
-                "%{customdata[1]}<br>"
-                "Recorded trade value: €%{customdata[2]:,.0f}<extra></extra>"
-            ),
-            showlegend=False,
-        )
-    )
     figure.update_layout(
-        height=min(1050, max(600, 210 + 62 * category_count)),
-        margin={"l": 145, "r": 145, "t": 24, "b": 24},
-        font={"family": "Arial, sans-serif", "size": 14, "color": "#202629"},
-        xaxis={
-            "range": [0, 1],
-            "visible": False,
-            "fixedrange": True,
-            "showgrid": False,
-            "zeroline": False,
-        },
-        yaxis={
-            "range": [1, 0],
-            "visible": False,
-            "fixedrange": True,
-            "showgrid": False,
-            "zeroline": False,
-        },
+        height=max(plot_height, 30 * category_count + 40),
+        margin={"l": 80, "r": 80, "t": 16, "b": 16},
+        font={"family": "Arial, sans-serif", "size": 12, "color": "#202629"},
     )
     return figure, total_value, category_codes, category_labels
 
@@ -211,16 +186,18 @@ def selected_sankey_code(clicked_points, category_codes):
     if not clicked_points:
         return None
 
-    clicked_point = clicked_points[0]
-    node_index = clicked_point.get("point_index", clicked_point.get("pointIndex"))
-    if (
-        clicked_point.get("curve_number", clicked_point.get("curveNumber"))
-        != 1
-        or not isinstance(node_index, int)
-        or not 0 <= node_index < len(category_codes)
-    ):
+    point = clicked_points[0]
+    if point.get("curveNumber") != 0 or "source" in point or "target" in point:
         return None
-    return category_codes[node_index]
+
+    custom_code = point.get("customdata")
+    if custom_code is not None and custom_code in category_codes:
+        return custom_code
+
+    node_index = point.get("pointNumber", point.get("pointIndex"))
+    if isinstance(node_index, int) and 1 <= node_index <= len(category_codes):
+        return category_codes[node_index - 1]
+    return None
 
 
 def parse_product_codes(raw_codes):
@@ -543,20 +520,21 @@ else:
                     "Clear any CN8 product filter to check all categories."
                 )
         else:
-            figure, represented_value, category_codes, category_labels = trade_sankey
+            figure, represented_value, category_codes, _ = trade_sankey
             st.metric("Positive trade value shown", f"€{represented_value:,.0f}")
-            chart_event = st.plotly_chart(
+            clicked_points = plotly_events(
                 figure,
-                use_container_width=True,
-                on_select="rerun",
-                selection_mode="points",
+                click_event=True,
+                select_event=False,
+                hover_event=False,
+                override_height=figure.layout.height,
                 key=(
                     f"trade-sankey-{sankey_prefix or 'root'}-"
                     f"{st.session_state.get('sankey_chart_version', 0)}"
                 ),
             )
             clicked_category_code = selected_sankey_code(
-                chart_event["selection"].get("points", []), category_codes
+                clicked_points, category_codes
             )
             if clicked_category_code:
                 st.session_state["sankey_prefix"] = clicked_category_code
@@ -572,7 +550,7 @@ else:
             st.caption(
                 "Flow widths show recorded customs trade value, not money transfers. "
                 "Click a product node to drill down into its next code level. "
-                "The 8 largest positive categories are shown individually; "
+                "The 8 largest visible positive categories are shown individually; "
                 "remaining positive categories are grouped as non-clickable Other."
             )
 
@@ -652,7 +630,7 @@ else:
             )
             chart_event = st.altair_chart(
                 product_chart,
-                use_container_width=True,
+                width="stretch",
                 key=f"product-category-chart-{chart_version}",
                 on_select="rerun",
                 selection_mode="cn8_bar_selection",
@@ -670,8 +648,8 @@ else:
             st.dataframe(
                 top_products,
                 hide_index=True,
-                use_container_width=True,
-                height=500,
+                width="stretch",
+                height=min(400, 30 * len(top_products) + 40)
             )
 
         selected_code = st.session_state.get("selected_cn8_code")
@@ -754,7 +732,7 @@ else:
                 )
                 .configure_view(stroke="#A9C0C8")
             )
-            st.altair_chart(time_series_chart, use_container_width=True)
+            st.altair_chart(time_series_chart, width="stretch")
         elif not sankey_prefix:
             st.subheader(f"{frequency.title()} trade value")
             st.caption(
@@ -775,8 +753,8 @@ else:
             st.dataframe(
                 all_products,
                 hide_index=True,
-                use_container_width=True,
-                height=500,
+                width="stretch",
+                height=min(400, 30 * len(top_products) + 40),
             )
 
             st.markdown("**Copy a full category label**")
@@ -815,8 +793,8 @@ else:
             st.dataframe(
                 details,
                 hide_index=True,
-                use_container_width=True,
-                height=500,
+                width="stretch",
+                height=min(400, 30 * len(top_products) + 40),
             )
             st.download_button(
                 "Download CSV",
