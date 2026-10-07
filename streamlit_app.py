@@ -183,7 +183,8 @@ st.markdown(
         background: var(--muted-ink) !important;
         border-color: var(--muted-ink) !important;
         color: var(--ink) !important;
-        transform: scale(1.06);
+        transform: skew(-10deg, 0);
+        transition: transform 0.3s ease-in-out;
     }
 
     section[data-testid="stSidebar"] [data-testid="stWidgetLabel"] p,
@@ -237,14 +238,14 @@ st.markdown(
     }
 
     div[data-testid="stButton"] button {
-        transition: background-color 0.16s ease, color 0.16s ease, transform 0.16s ease;
+        transition: background-color 0.3s ease-in-out, color 0.3s ease-in-out, transform 0.3s ease-in-out;
     }
 
     div[data-testid="stButton"] button:hover {
         background: var(--cyan) !important;
         color: var(--paper) !important;
         border-color: var(--cyan) !important;
-        transform: translateY(-1px);
+        transform: skew(-10deg, 0);
     }
 
     div[data-testid="stMetric"] {
@@ -282,64 +283,6 @@ st.title("𓅋 Haitem • Trade & procurement flows of Finland")
 
 with st.sidebar:
     st.header("Query")
-    sidebar_sankey_prefix = st.session_state.get("sankey_prefix", "")
-    navigation_col, up_col = st.columns(2)
-    if navigation_col.button(
-        "Level 0",
-        key="sankey-reset-sidebar",
-        type="primary",
-        disabled=not sidebar_sankey_prefix,
-    ):
-        request_product_query("", "", None)
-        st.rerun()
-    if up_col.button(
-        "Up one level",
-        key="sankey-back-sidebar",
-        type="primary",
-        disabled=not sidebar_sankey_prefix,
-    ):
-        parent_prefix = sidebar_sankey_prefix[:-2]
-        request_product_query(parent_prefix, parent_prefix)
-        st.rerun()
-    selected_query_codes = st.session_state.get("selectedProductClasses", [])
-    for selected_query_code in selected_query_codes:
-        classification_labels = st.session_state.get(
-            "product_classification_labels", {}
-        )
-        selected_query_label = classification_labels.get(
-            len(selected_query_code), {}
-        ).get(selected_query_code)
-        previous_result = st.session_state.get("uljas_result")
-        if not selected_query_label and previous_result:
-            previous_products = previous_result[3]
-            matching_product = previous_products.loc[
-                previous_products["Product code"].astype(str).eq(selected_query_code),
-                "Product",
-            ]
-            if not matching_product.empty:
-                selected_query_label = matching_product.iloc[0]
-        with st.container(border=True):
-            category_column, remove_column = st.columns([3, 1])
-            category_column.markdown(
-                f"<span style='color:#D27A37;font-weight:800'>"
-                f"{format_cn_code(selected_query_code)}</span>",
-                unsafe_allow_html=True,
-            )
-            category_column.caption(
-                selected_query_label or "Selected product class"
-            )
-            if remove_column.button(
-                "×",
-                key=f"remove-query-class-{selected_query_code}",
-                help=f"Remove {format_cn_code(selected_query_code)} from the query.",
-            ):
-                remaining_codes = [
-                    code
-                    for code in selected_query_codes
-                    if code != selected_query_code
-                ]
-                request_product_query("", "", remaining_codes)
-                st.rerun()
     with st.form("uljas-query"):
         country = st.text_input(
             "Partner country code (ISO-2)", value="", placeholder="e.g. SE"
@@ -357,6 +300,67 @@ with st.sidebar:
             f"End period ({period_format}; blank = latest)", value="", key=f"end-{frequency}"
         )
         submitted = st.form_submit_button("Load statistics", type="primary")
+
+        selected_query_codes = st.session_state.get("selectedProductClasses", [])
+        for selected_query_code in selected_query_codes:
+            classification_labels = st.session_state.get(
+                "product_classification_labels", {}
+            )
+            selected_query_label = classification_labels.get(
+                len(selected_query_code), {}
+            ).get(selected_query_code)
+            previous_result = st.session_state.get("uljas_result")
+            if not selected_query_label and previous_result:
+                previous_products = previous_result[3]
+                matching_product = previous_products.loc[
+                    previous_products["Product code"].astype(str).eq(selected_query_code),
+                    "Product",
+                ]
+                if not matching_product.empty:
+                    selected_query_label = matching_product.iloc[0]
+            with st.container(border=True):
+                category_column, remove_column = st.columns([3, 1])
+                category_column.markdown(
+                    f"<span style='color:#D27A37;font-weight:800'>"
+                    f"{format_cn_code(selected_query_code)}</span>",
+                    unsafe_allow_html=True,
+                )
+                category_column.caption(
+                    selected_query_label or "Selected product class"
+                )
+                if remove_column.button(
+                    "×",
+                    key=f"remove-query-class-{selected_query_code}",
+                    help=f"Remove {format_cn_code(selected_query_code)} from the query.",
+                ):
+                    remaining_codes = [
+                        code
+                        for code in selected_query_codes
+                        if code != selected_query_code
+                    ]
+                    request_product_query("", "", remaining_codes)
+                    st.rerun()
+    sidebar_sankey_prefix = st.session_state.get("sankey_prefix", "")
+    navigation_col, up_col = st.columns(2)
+    if navigation_col.button(
+        "Show all product classes",
+        key="sankey-reset-sidebar",
+        type="primary",
+        wrap=True,
+        disabled=not sidebar_sankey_prefix,
+    ):
+        request_product_query("", "", None)
+        st.rerun()
+    if up_col.button(
+        "Up one level",
+        key="sankey-back-sidebar",
+        type="primary",
+        wrap=True,
+        disabled=not sidebar_sankey_prefix,
+    ):
+        parent_prefix = sidebar_sankey_prefix[:-2]
+        request_product_query(parent_prefix, parent_prefix)
+        st.rerun()
     st.caption(
         "Data loads on submit or when product classes are selected. Identical "
         "requests are cached for 1 hour."
