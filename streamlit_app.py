@@ -236,10 +236,6 @@ with st.sidebar:
         end = st.text_input(
             f"End period ({period_format}; blank = latest)", value="", key=f"end-{frequency}"
         )
-        product_code_input = st.text_input(
-            "CN8 product code(s), optional",
-            help="Enter exact CN8 codes separated by commas (up to 10) to query focused product time series.",
-        )
         submitted = st.form_submit_button("Load statistics", type="primary")
     st.caption(
         "Data loads on submit or when a product bar is selected. Identical "
