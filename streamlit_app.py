@@ -768,8 +768,7 @@ else:
             st.subheader("Top 5 exporters · plenary decisions")
             st.caption(
                 "Ranked by listed decision count across all destinations in this period. "
-                "This plenary archive is not a complete register; decisions are not "
-                "completed exports, and their counts are not customs trade values."
+                "This plenary archive is not register of de facto exports."
             )
             period_frequency = "M" if frequency == "month" else "Y"
             period_start = pd.Period(
