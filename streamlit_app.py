@@ -302,44 +302,46 @@ with st.sidebar:
         submitted = st.form_submit_button("Load statistics", type="primary")
 
         selected_query_codes = st.session_state.get("selectedProductClasses", [])
-        for selected_query_code in selected_query_codes:
-            classification_labels = st.session_state.get(
-                "product_classification_labels", {}
+    for selected_query_code in selected_query_codes:
+        classification_labels = st.session_state.get(
+            "product_classification_labels", {}
+        )
+        selected_query_label = classification_labels.get(
+            len(selected_query_code), {}
+        ).get(selected_query_code)
+        previous_result = st.session_state.get("uljas_result")
+        if not selected_query_label and previous_result:
+            previous_products = previous_result[3]
+            matching_product = previous_products.loc[
+                previous_products["Product code"].astype(str).eq(selected_query_code),
+                "Product",
+            ]
+            if not matching_product.empty:
+                selected_query_label = matching_product.iloc[0]
+        with st.container(border=True):
+            category_column, remove_column = st.columns([3, 1])
+            category_column.markdown(
+                f"<span style='color:#D27A37;font-weight:800'>"
+                f"{format_cn_code(selected_query_code)}</span>",
+                unsafe_allow_html=True,
             )
-            selected_query_label = classification_labels.get(
-                len(selected_query_code), {}
-            ).get(selected_query_code)
-            previous_result = st.session_state.get("uljas_result")
-            if not selected_query_label and previous_result:
-                previous_products = previous_result[3]
-                matching_product = previous_products.loc[
-                    previous_products["Product code"].astype(str).eq(selected_query_code),
-                    "Product",
+            category_column.caption(
+                selected_query_label or "Selected product class"
+            )
+            if remove_column.button(
+                "×",
+                key=f"remove-query-class-{selected_query_code}",
+                help=f"Remove {format_cn_code(selected_query_code)} from the query.",
+            ):
+                remaining_codes = [
+                    code
+                    for code in selected_query_codes
+                    if code != selected_query_code
                 ]
-                if not matching_product.empty:
-                    selected_query_label = matching_product.iloc[0]
-            with st.container(border=True):
-                category_column, remove_column = st.columns([3, 1])
-                category_column.markdown(
-                    f"<span style='color:#D27A37;font-weight:800'>"
-                    f"{format_cn_code(selected_query_code)}</span>",
-                    unsafe_allow_html=True,
-                )
-                category_column.caption(
-                    selected_query_label or "Selected product class"
-                )
-                if remove_column.button(
-                    "×",
-                    key=f"remove-query-class-{selected_query_code}",
-                    help=f"Remove {format_cn_code(selected_query_code)} from the query.",
-                ):
-                    remaining_codes = [
-                        code
-                        for code in selected_query_codes
-                        if code != selected_query_code
-                    ]
-                    request_product_query("", "", remaining_codes)
-                    st.rerun()
+                request_product_query("", "", remaining_codes)
+                st.rerun()
+
+    st.header("Navigation")
     sidebar_sankey_prefix = st.session_state.get("sankey_prefix", "")
     navigation_col, up_col = st.columns(2)
     if navigation_col.button(
