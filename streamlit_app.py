@@ -1307,5 +1307,3 @@ else:
                         "Load the public archive to see decision counts. "
                         "Yearly results and decision text are cached locally."
                     )
-
-st.caption("Source: Finnish Customs (Tulli), ULJAS. Quote Tulli when reusing the data.")

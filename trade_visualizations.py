@@ -44,6 +44,7 @@ def make_trade_sankey(
     classification_labels,
     parent_code="",
     max_visible=8,
+    max_visible_children=3,
 ):
     codes = products["Product code"].astype(str)
     valid_codes = codes.str.fullmatch(r"\d{2,8}")
@@ -116,35 +117,89 @@ def make_trade_sankey(
         return None
     visible_scopes = scope_totals.head(max_visible).copy()
     scope_set = set(visible_scopes["Scope code"])
-    ranked_children = (
-        trade_products.loc[trade_products["Scope code"].isin(scope_set)]
-        .groupby(["Scope code", "Drill code"], as_index=False)
-        .agg({"Value (EUR)": "sum"})
-        .sort_values("Value (EUR)", ascending=False)
-    )
     other_scopes = scope_totals.loc[~scope_totals["Scope code"].isin(scope_set)]
     other_value = float(other_scopes["Value (EUR)"].sum()) if not other_scopes.empty else 0.0
     total_value = float(scope_totals["Value (EUR)"].sum())
 
     scope_labels = [format_cn_code(code) for code in visible_scopes["Scope code"]]
     scope_names = [class_label(code) for code in visible_scopes["Scope code"]]
-    child_labels = [format_cn_code(code) for code in ranked_children["Drill code"]]
-    child_names = [class_label(code) for code in ranked_children["Drill code"]]
+    scope_count = len(visible_scopes)
 
+    # Child level: per scope, top N children by value; remainder grouped
+    # into a per-scope "Other" node.
+    children_by_scope: dict[str, list[dict[str, object]]] = {}
+    for scope_code in visible_scopes["Scope code"]:
+        children = (
+            trade_products.loc[trade_products["Scope code"] == scope_code]
+            .groupby("Drill code", as_index=False)
+            .agg({"Value (EUR)": "sum"})
+            .sort_values("Value (EUR)", ascending=False)
+        )
+        children_by_scope[scope_code] = [
+            {"drill": row["Drill code"], "value": float(row["Value (EUR)"])}
+            for _, row in children.iterrows()
+        ]
+
+    ranked_children: list[dict[str, object]] = []
+    other_child_rows: list[dict[str, object]] = []
+    for scope_code in visible_scopes["Scope code"]:
+        children = children_by_scope[scope_code]
+        if not children:
+            continue
+        top = children[:max_visible_children]
+        rest = children[max_visible_children:]
+        for row in top:
+            row["scope"] = scope_code
+            ranked_children.append(row)
+        for row in rest:
+            row["scope"] = scope_code
+            other_child_rows.append(row)
+
+    child_labels = [format_cn_code(r["drill"]) for r in ranked_children]
+    child_names = [class_label(r["drill"]) for r in ranked_children]
+    child_count = len(child_labels)
+
+    # Per-scope "Other" nodes for remaining children, kept in scope order so
+    # node positions and links stay aligned.
+    scope_other_values: dict[str, float] = {}
+    for row in other_child_rows:
+        scope = row["scope"]
+        scope_other_values[scope] = scope_other_values.get(scope, 0.0) + row["value"]
+    child_other_entries: list[tuple[str, str, str, float]] = []
+    for scope_code in visible_scopes["Scope code"]:
+        value = scope_other_values.get(scope_code, 0.0)
+        if value > 0:
+            count = sum(1 for r in other_child_rows if r["scope"] == scope_code)
+            child_other_entries.append(
+                (scope_code, f"Other ({count:,})", "Combined remaining product classes", value)
+            )
+    child_other_labels = [entry[1] for entry in child_other_entries]
+    child_other_names = [entry[2] for entry in child_other_entries]
+
+    # Build node labels/names in correct order:
+    # source, scopes, children, per-scope "Other" nodes, destination.
     node_labels = [source, *scope_labels, *child_labels]
     if other_value > 0:
         node_labels.append(f"Other ({len(other_scopes):,})")
+    node_labels += child_other_labels
     node_labels.append(destination)
     node_names = [source, *scope_names, *child_names]
     if other_value > 0:
         node_names.append("Combined remaining product classes")
+    node_names += child_other_names
     node_names.append(destination)
-    scope_count = len(visible_scopes)
-    child_count = len(ranked_children)
-    has_other = other_value > 0
+
+    other_count = len(child_other_labels)
     scope_index = {code: index + 1 for index, code in enumerate(visible_scopes["Scope code"])}
-    child_index = {code: scope_count + 1 + index for index, code in enumerate(ranked_children["Drill code"])}
-    destination_index = scope_count + child_count + (1 if has_other else 0) + 1
+    child_index = {code: scope_count + 1 + index for index, code in enumerate(child_labels)}
+    # Node order: source, scopes, children, scope-level "Other" (optional),
+    # per-scope child "Other" nodes, destination last.
+    scope_other_index = scope_count + child_count + 1
+    child_other_start = scope_other_index + (1 if other_value > 0 else 0)
+    other_index_map: dict[str, int] = {}
+    for offset, entry in enumerate(child_other_entries):
+        other_index_map[entry[0]] = child_other_start + offset
+    destination_index = child_other_start + other_count
 
     link_source, link_target, link_value, link_custom = [], [], [], []
     for position, row in enumerate(visible_scopes.itertuples()):
@@ -152,31 +207,49 @@ def make_trade_sankey(
         link_target.append(scope_index[row._1])
         link_value.append(float(row._2))
         link_custom.append([scope_labels[position], scope_names[position]])
-    for row in ranked_children.itertuples():
-        position = child_index[row._2] - scope_count - 1
-        link_source.append(scope_index[row._1])
-        link_target.append(child_index[row._2])
-        link_value.append(float(row._3))
-        link_custom.append([child_labels[position], child_names[position]])
-    for row in ranked_children.itertuples():
-        position = child_index[row._2] - scope_count - 1
-        link_source.append(child_index[row._2])
+    for row in ranked_children:
+        scope = row["scope"]
+        drill = format_cn_code(row["drill"])
+        link_source.append(scope_index[scope])
+        link_target.append(child_index[drill])
+        link_value.append(row["value"])
+        link_custom.append([child_labels[child_index[drill] - scope_count - 1], child_names[child_index[drill] - scope_count - 1]])
+    for row in ranked_children:
+        drill = format_cn_code(row["drill"])
+        link_source.append(child_index[drill])
         link_target.append(destination_index)
-        link_value.append(float(row._3))
-        link_custom.append([child_labels[position], child_names[position]])
-    if has_other:
-        other_index = scope_count + child_count + 1
+        link_value.append(row["value"])
+        link_custom.append([child_labels[child_index[drill] - scope_count - 1], child_names[child_index[drill] - scope_count - 1]])
+    for scope_code, label, name, value in child_other_entries:
+        other_index = other_index_map[scope_code]
+        link_source.extend([scope_index[scope_code], other_index])
+        link_target.extend([other_index, destination_index])
+        link_value.extend([value, value])
+        link_custom.extend([[label, name]] * 2)
+    if other_value > 0:
+        other_index = scope_other_index
         link_source.extend([0, other_index])
         link_target.extend([other_index, destination_index])
         link_value.extend([other_value, other_value])
-        link_custom.extend([[f"Other ({len(other_scopes):,})", "Combined remaining product classes"]] * 2)
+        link_custom.extend(
+            [[f"Other ({len(other_scopes):,})", "Combined remaining product classes"]] * 2
+        )
 
     node_count = len(node_labels)
     plot_height = 900
-    category_codes = visible_scopes["Scope code"].tolist() + ranked_children["Drill code"].tolist()
+    category_codes = visible_scopes["Scope code"].tolist() + child_labels
     category_labels = scope_labels + child_labels
-    category_count = node_count - 2
-    scope_x = [0.02] + [0.32] * scope_count + [0.66] * child_count + ([0.66] if has_other else []) + [0.98]
+    # One x per node, by column: source(1), scopes(2), children(3),
+    # destination(4). The scope-level "Other" belongs with the scopes in
+    # column 2; child-level "Others" stay with the children in column 3.
+    scope_x = (
+        [0.02]
+        + [0.32] * scope_count
+        + [0.66] * child_count
+        + ([0.32] if other_value > 0 else [])
+        + [0.66] * other_count
+        + [0.98]
+    )
     scope_y = [0.02] + [0.02] * (node_count - 2) + [0.02]
 
     figure = go.Figure(
@@ -184,7 +257,7 @@ def make_trade_sankey(
             arrangement="snap",
             node={
                 "label": node_labels,
-                "color": ["#333a3d", *["#426d78"] * category_count, "#426d78"],
+                "color": ["#333a3d", *["#426d78"] * (node_count - 1)],
                 "line": {"color": "#333a3d", "width": 0.5},
                 "pad": 10,
                 "thickness": 14,
