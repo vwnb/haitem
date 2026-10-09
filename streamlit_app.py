@@ -3,7 +3,7 @@ import pandas as pd
 import requests
 import streamlit as st
 
-from customs_analysis import make_customs_pca
+from customs_analysis import cluster_pca_points, make_customs_pca
 from export_licences import (
     decisions_in_period,
     load_decision_texts,
@@ -51,7 +51,6 @@ def request_product_query(product_prefix, sankey_prefix, selected_codes=None):
     query_prefixes = selected_codes or ((product_prefix,) if product_prefix else ())
     st.session_state["pending_product_prefixes"] = query_prefixes
     st.session_state["sankey_prefix"] = sankey_prefix
-    st.session_state["sankey_depth"] = len(sankey_prefix) // 2
     st.session_state["selectedProductClasses"] = list(selected_codes)
     bump_chart_versions()
 
@@ -82,15 +81,22 @@ def navigate_to_product_classes(product_codes, replace_selection=False):
         and "pending_product_prefixes" not in st.session_state
     ):
         return False
+    # Plain drill-down: one click loads the clicked branch (which always
+    # carries two hierarchy levels now), so every view has composition.
+    # The only remap is leaf CN8 -> its CN6 parent (siblings view).
     sankey_prefix = ""
     if len(selected_codes) == 1:
-        selected_code = selected_codes[0]
-        sankey_prefix = (
-            selected_code[:-2]
-            if selected_code.isdigit() and len(selected_code) == 8
-            else selected_code
-        )
-    request_product_query(selected_codes[0], sankey_prefix, selected_codes)
+        clicked_code = selected_codes[0]
+        if clicked_code.isdigit() and len(clicked_code) == 8:
+            sankey_prefix = clicked_code[:-2]
+            selected_codes = [sankey_prefix]
+        else:
+            sankey_prefix = clicked_code
+    request_product_query(
+        selected_codes[0] if selected_codes else "",
+        sankey_prefix,
+        selected_codes,
+    )
     return True
 
 
@@ -302,6 +308,9 @@ with st.sidebar:
         submitted = st.form_submit_button("Load statistics", type="primary")
 
         selected_query_codes = st.session_state.get("selectedProductClasses", [])
+
+    st.header("Navigation")
+
     for selected_query_code in selected_query_codes:
         classification_labels = st.session_state.get(
             "product_classification_labels", {}
@@ -341,7 +350,6 @@ with st.sidebar:
                 request_product_query("", "", remaining_codes)
                 st.rerun()
 
-    st.header("Navigation")
     sidebar_sankey_prefix = st.session_state.get("sankey_prefix", "")
     navigation_col, up_col = st.columns(2)
     if navigation_col.button(
@@ -380,7 +388,6 @@ if submitted or pending_product_query:
             st.session_state.pop("pending_product_prefixes", None)
             st.session_state["selectedProductClasses"] = []
             st.session_state["sankey_prefix"] = ""
-            st.session_state["sankey_depth"] = 0
         else:
             query_prefixes = st.session_state.pop("pending_product_prefixes")
         st.session_state.pop("uljas_result", None)
@@ -405,8 +412,10 @@ if submitted or pending_product_query:
         (
             timeline,
             top_products,
+            leaf_products,
             all_products,
             details,
+            leaf_details,
         ) = make_dataframes(result, frequency)
         load_status.caption("Loading product-class labels...")
         classification_labels = load_product_classification_labels()
@@ -414,8 +423,10 @@ if submitted or pending_product_query:
             result,
             timeline,
             top_products,
+            leaf_products,
             all_products,
             details,
+            leaf_details,
             country,
             flow,
             frequency,
@@ -437,8 +448,10 @@ else:
         result,
         timeline,
         top_products,
+        leaf_products,
         all_products,
         details,
+        leaf_details,
         country,
         flow,
         frequency,
@@ -455,13 +468,15 @@ else:
         first_period = timeline["Date"].min().strftime(date_format)
         last_period = timeline["Date"].max().strftime(date_format)
         active_product_prefix = st.session_state.get("active_product_prefix", "")
+        sankey_prefix = st.session_state.get("sankey_prefix", "")
         selected_scope_codes = st.session_state.get("selectedProductClasses", [])
+        focus_prefix = sankey_prefix or active_product_prefix
         product_scope = (
             f"{len(selected_scope_codes):,} selected product classes"
             if len(selected_scope_codes) > 1
-            else f"{format_cn_code(active_product_prefix)} and descendants"
-            if active_product_prefix
-            else "all product classes"
+            else f"{format_cn_code(focus_prefix)} branch (two levels)"
+            if focus_prefix
+            else "all chapters + headings"
         )
         st.metric(
             f"Total value · {product_scope} · {first_period}–{last_period}",
@@ -470,26 +485,441 @@ else:
 
         source = "Finland" if flow == "exports" else country
         destination = country if flow == "exports" else "Finland"
+
+        st.subheader("Product class PCA")
+        with st.container():
+            st.write(
+                "Compare how selected product classes move together over time. "
+                "Period dots show customs-value profiles; labeled diamonds show "
+                "each product class's contribution to the axes. "
+                "Symbol size is relative to customs value (€)."
+            )
+            st.write(
+                "Positions are standardized by product class so large classes do not "
+                "dominate. This uses customs data, not procurement data. "
+                "The available customs and exporter datasets do not link company "
+                "names to product classes or customs values."
+            )
+            # PCA compares leaf rows only (no double-counted parent rows): the
+            # top scope groups in this view, so axes show real compositional
+            # variance at every level.
+            leaf_depths = leaf_details.loc[
+                leaf_details["Product code"].astype(str).str.startswith(sankey_prefix),
+                "Product code",
+            ].astype(str).str.len()
+            deepest = int(leaf_depths.max()) if not leaf_depths.empty else max(len(sankey_prefix), 2)
+            if deepest <= len(sankey_prefix):
+                scope_depth = max(len(sankey_prefix) - 2, 2)
+            else:
+                scope_depth = max(len(sankey_prefix), min(deepest - 2, 6))
+                if scope_depth < 2:
+                    scope_depth = 2
+            scope_totals = (
+                leaf_details.loc[
+                    leaf_details["Product code"].astype(str).str.startswith(sankey_prefix)
+                ]
+                .assign(**{"Scope": lambda frame: frame["Product code"].astype(str).str[:scope_depth]})
+                .groupby("Scope", as_index=False)["Value (EUR)"]
+                .sum()
+                .sort_values("Value (EUR)", ascending=False)
+            )
+            selected_pca_codes = scope_totals["Scope"].head(8).tolist()
+            try:
+                pca_scores, pca_categories, explained_variance = make_customs_pca(
+                    leaf_details, selected_pca_codes, group_length=scope_depth
+                )
+            except ValueError as error:
+                st.info(str(error))
+            else:
+                st.metric(
+                    "Variance explained by displayed axes",
+                    f"{explained_variance.sum():.1%}",
+                )
+                cluster_control_col, cluster_count_col = st.columns(2)
+                with cluster_control_col:
+                    cluster_target = st.radio(
+                        "Color points by similarity",
+                        ("Product classes", "Periods", "Off"),
+                        horizontal=True,
+                        help=(
+                            "Simple k-means clustering on the displayed PC1/PC2 "
+                            "positions. Product classes that move together share "
+                            "a color, or periods with similar profiles share a "
+                            "color."
+                        ),
+                    )
+                cluster_point_counts = {
+                    "Product classes": len(pca_categories),
+                    "Periods": len(pca_scores),
+                    "Off": 0,
+                }
+                max_clusters = max(
+                    2, min(5, cluster_point_counts.get(cluster_target, 0))
+                )
+                with cluster_count_col:
+                    n_clusters = st.slider(
+                        "Number of clusters",
+                        min_value=2,
+                        max_value=max_clusters,
+                        value=min(3, max_clusters),
+                        disabled=cluster_target == "Off",
+                        help="How many color groups k-means should find.",
+                        key=(
+                            f"pca-cluster-count-{cluster_target}-"
+                            f"{hash(tuple(selected_pca_codes))}"
+                        ),
+                    )
+                pca_cluster_colors = [
+                    "#426D78",
+                    "#D27A37",
+                    "#6A9EAF",
+                    "#B3541E",
+                    "#8DB255",
+                ]
+                cluster_labels_order = [
+                    f"Cluster {index + 1}" for index in range(n_clusters)
+                ]
+                pca_scores_plot = pca_scores.copy()
+                pca_categories_plot = pca_categories.copy()
+                if cluster_target == "Periods":
+                    pca_scores_plot["Cluster"] = cluster_pca_points(
+                        pca_scores, n_clusters
+                    )[0]
+                elif cluster_target == "Product classes":
+                    pca_categories_plot["Cluster"] = cluster_pca_points(
+                        pca_categories, n_clusters
+                    )[0]
+                period_color = (
+                    alt.Color(
+                        "Cluster:N",
+                        title="Period cluster",
+                        sort=cluster_labels_order,
+                        scale=alt.Scale(range=pca_cluster_colors[:n_clusters]),
+                    )
+                    if cluster_target == "Periods"
+                    else alt.value("#426D78")
+                )
+                category_fill = (
+                    alt.Color(
+                        "Cluster:N",
+                        title="Class cluster",
+                        sort=cluster_labels_order,
+                        scale=alt.Scale(range=pca_cluster_colors[:n_clusters]),
+                    )
+                    if cluster_target == "Product classes"
+                    else alt.condition(
+                        alt.datum.Selected,
+                        alt.value("#D27A37"),
+                        alt.value("#333A3D"),
+                    )
+                )
+                period_tooltips = [
+                    alt.Tooltip("Period:T", title="Period"),
+                    alt.Tooltip(
+                        "Value (EUR):Q",
+                        title="Period value",
+                        format=",.0f",
+                    ),
+                    alt.Tooltip("PC1:Q", format=".3f"),
+                    alt.Tooltip("PC2:Q", format=".3f"),
+                ] + (
+                    [alt.Tooltip("Cluster:N", title="Period cluster")]
+                    if cluster_target == "Periods"
+                    else []
+                )
+                category_tooltips = [
+                    alt.Tooltip("Label:N", title="Product class"),
+                    alt.Tooltip("CN code:N", title="CN code"),
+                    alt.Tooltip(
+                        "Value (EUR):Q",
+                        title="Class value",
+                        format=",.0f",
+                    ),
+                    alt.Tooltip("PC1:Q", title="PC1 coordinate", format=".3f"),
+                    alt.Tooltip("PC2:Q", title="PC2 coordinate", format=".3f"),
+                    alt.Tooltip(
+                        "Confidence:Q",
+                        title="Two-PC representation quality",
+                        format=".1%",
+                    ),
+                ] + (
+                    [alt.Tooltip("Cluster:N", title="Class cluster")]
+                    if cluster_target == "Product classes"
+                    else []
+                )
+                period_chart = (
+                    alt.Chart(pca_scores_plot)
+                    .mark_circle(
+                        filled=True,
+                        stroke="#202629",
+                        strokeWidth=1,
+                    )
+                    .encode(
+                        x=alt.X(
+                            "PC1:Q",
+                            title=f"PC1 ({explained_variance[0]:.1%})",
+                            scale=alt.Scale(zero=False),
+                            axis=alt.Axis(grid=False),
+                        ),
+                        y=alt.Y(
+                            "PC2:Q",
+                            title=f"PC2 ({explained_variance[1]:.1%})",
+                            scale=alt.Scale(zero=False),
+                            axis=alt.Axis(grid=False),
+                        ),
+                        color=period_color,
+                        size=alt.Size(
+                            "Value (EUR):Q",
+                            title="Period value",
+                            legend=None,
+                            scale=alt.Scale(range=[60, 420]),
+                        ),
+                        tooltip=period_tooltips,
+                    )
+                )
+                selected_product_classes = st.session_state.get(
+                    "selectedProductClasses", []
+                )
+                category_points = (
+                    alt.Chart(
+                        pca_categories_plot.assign(
+                            **{
+                                "CN code": pca_categories_plot["Product code"].map(
+                                    format_cn_code
+                                ),
+                                "Label": pca_categories_plot["Product"].map(
+                                    lambda name: str(name)[:30]
+                                ),
+                                "Selected": pca_categories_plot["Product code"].map(
+                                    lambda code: any(
+                                        str(code).startswith(selected_code)
+                                        for selected_code in selected_product_classes
+                                    )
+                                ),
+                            }
+                        )
+                    )
+                    .mark_point(
+                        shape="diamond",
+                        filled=True,
+                        strokeWidth=2,
+                    )
+                    .encode(
+                        x=alt.X("PC1:Q", axis=alt.Axis(grid=False)),
+                        y=alt.Y("PC2:Q", axis=alt.Axis(grid=False)),
+                        fill=category_fill,
+                        size=alt.Size(
+                            "Value (EUR):Q",
+                            title="Class value",
+                            legend=None,
+                            scale=alt.Scale(range=[60, 420]),
+                        ),
+                        stroke=alt.condition(
+                            alt.datum.Selected,
+                            alt.value("#202629"),
+                            alt.value("#333A3D"),
+                        ),
+                        tooltip=category_tooltips,
+                    )
+                    .add_params(
+                        alt.selection_point(
+                            fields=["Product code"],
+                            name="product_class_bar_selection",
+                            clear=False,
+                            toggle=False,
+                        )
+                    )
+                )
+                category_labels = (
+                    alt.Chart(
+                        pca_categories_plot.assign(
+                            **{
+                                "Label": pca_categories_plot["Product"].map(
+                                    lambda name: str(name)[:30]
+                                ),
+                                "CN code": pca_categories_plot["Product code"].map(
+                                    format_cn_code
+                                ),
+                                "Selected": pca_categories_plot["Product code"].map(
+                                    lambda code: any(
+                                        str(code).startswith(selected_code)
+                                        for selected_code in selected_product_classes
+                                    )
+                                ),
+                            }
+                        )
+                    )
+                    .mark_text(
+                        align="left",
+                        baseline="middle",
+                        dx=7,
+                        fontWeight="bold",
+                    )
+                    .encode(
+                        x=alt.X("PC1:Q", axis=alt.Axis(grid=False)),
+                        y=alt.Y("PC2:Q", axis=alt.Axis(grid=False)),
+                        text=alt.Text("Label:N"),
+                        size=alt.condition(
+                            alt.datum.Selected,
+                            alt.value(15),
+                            alt.value(11),
+                        ),
+                        color=alt.condition(
+                            alt.datum.Selected,
+                            alt.value("#B3541E"),
+                            alt.value("#202629"),
+                        ),
+                        tooltip=category_tooltips,
+                    )
+                )
+                pca_chart = (
+                    (period_chart + category_points + category_labels)
+                    .resolve_scale(size="shared")
+                    .properties(height=440)
+                    .interactive()
+                    .configure_axis(
+                        labelColor="#333A3D",
+                        titleColor="#333A3D",
+                        grid=False,
+                        labelFont="Arial",
+                        titleFont="Arial",
+                    )
+                    .configure_view(stroke="#A9C0C8")
+                )
+                pca_chart_event = st.altair_chart(
+                    pca_chart,
+                    width="stretch",
+                    key=(
+                        f"pca-product-classes-{country}-{flow}-{frequency}-"
+                        f"{start}-{end}-{hash(tuple(selected_pca_codes))}-"
+                        f"{hash(tuple(selected_product_classes))}-"
+                        f"{cluster_target}-{n_clusters}"
+                    ),
+                    on_select="rerun",
+                    selection_mode="product_class_bar_selection",
+                )
+                clicked_pca_codes = selected_product_codes(pca_chart_event.selection)
+                if navigate_to_product_classes(clicked_pca_codes):
+                    st.rerun()
+                if cluster_target == "Off":
+                    st.caption(
+                        "Nearby periods have similar standardized customs-value "
+                        "profiles. Product-class coordinates indicate association "
+                        "with each axis; they are not company-level observations. "
+                        "The confidence score is cos²: the share of product-class variation "
+                        "represented by the displayed two components, not statistical "
+                        "certainty. High 🟢 means over 90% representation."
+                    )
+                else:
+                    st.caption(
+                        f"Colors are simple k-means clusters (k={n_clusters}) on the "
+                        f"displayed PC1/PC2 positions for {cluster_target.lower()}; "
+                        "same color means similar movement on these two axes, not a "
+                        "formal classification. The confidence score is cos²: the share "
+                        "of product-class variation represented by the displayed two "
+                        "components, not statistical certainty. High 🟢 means over 90% "
+                        "representation."
+                    )
+                pca_table_source = pca_categories_plot.assign(
+                    **{
+                        "CN code": pca_categories_plot["Product code"].map(format_cn_code),
+                        "Label": pca_categories_plot["Product"].map(
+                            lambda name: str(name)[:30]
+                        ),
+                    }
+                )
+                if cluster_target == "Product classes":
+                    pass  # Cluster column already present on the plotted frame.
+                elif cluster_target == "Periods":
+                    pca_table_source["Cluster"] = cluster_pca_points(
+                        pca_categories, n_clusters
+                    )[0]
+                else:
+                    pca_table_source = pca_table_source.drop(
+                        columns=["Cluster"], errors="ignore"
+                    )
+                pca_table = pca_table_source.sort_values(
+                    "Confidence", ascending=False
+                ).reset_index(drop=True)
+                pca_table["Assessment"] = pca_table["Confidence"].map(
+                    lambda score: "High 🟢" if score > 0.9 else "—"
+                )
+                pca_table_column_config = {
+                    "Product code": st.column_config.TextColumn(
+                        "Product code", disabled=True
+                    ),
+                    "CN code": st.column_config.TextColumn("CN code"),
+                    "Label": st.column_config.TextColumn("Product class (30 chars)"),
+                    "Product": st.column_config.TextColumn("Full product name"),
+                    "Value (EUR)": st.column_config.NumberColumn(
+                        "Class value (€)", format="%.0f"
+                    ),
+                    "PC1": st.column_config.NumberColumn(
+                        "PC1 coordinate", format="%.3f"
+                    ),
+                    "PC2": st.column_config.NumberColumn(
+                        "PC2 coordinate", format="%.3f"
+                    ),
+                    "Confidence": st.column_config.NumberColumn(
+                        "Confidence score", format="percent"
+                    ),
+                    "Assessment": st.column_config.TextColumn("Assessment"),
+                }
+                if "Cluster" in pca_table.columns:
+                    pca_table_column_config["Cluster"] = st.column_config.TextColumn(
+                        "Cluster"
+                    )
+                pca_table_selection = st.dataframe(
+                    pca_table,
+                    hide_index=True,
+                    width="stretch",
+                    column_config=pca_table_column_config,
+                    on_select="rerun",
+                    selection_mode="multi-row",
+                    key=(
+                        f"pca-product-class-table-{country}-{flow}-{frequency}-"
+                        f"{start}-{end}-{hash(tuple(selected_pca_codes))}"
+                    ),
+                )
+                pca_table_product_codes = selected_table_product_codes(
+                    pca_table_selection.selection, pca_table
+                )
+                if navigate_to_product_classes(pca_table_product_codes):
+                    st.rerun()
+
+        if not sankey_prefix:
+            st.subheader(f"{frequency.title()} trade value")
+            st.caption(
+                "Series is the total across all returned product classes."
+            )
+            st.line_chart(
+                timeline,
+                x="Date",
+                y="Value (EUR)",
+                color="#426D78",
+            )
+
         st.subheader(f"Trade flow · {source} → {destination}")
-        sankey_prefix = st.session_state.get("sankey_prefix", "")
-        sankey_depth = st.session_state.get("sankey_depth", len(sankey_prefix) // 2)
-        st.caption(f"Sankey zoom depth: {sankey_depth} / 4")
         if sankey_prefix:
             st.caption(
                 f"Breakdown path: {source} → {format_cn_code(sankey_prefix)} "
-                f"→ {destination}"
+                f"→ {destination} · two hierarchy levels at once, click any node to drill deeper"
+            )
+        else:
+            st.caption(
+                "Chapters → headings in one view · "
+                f"{source} → {destination} · click any node to drill deeper"
             )
         st.caption(
             f"Showing product classes for {source} → {destination} · "
             f"{first_period}–{last_period}"
         )
         trade_sankey = make_trade_sankey(
-            all_products,
+            leaf_products,
             source,
             destination,
             st.session_state.get("product_classification_labels", {}),
             sankey_prefix,
-            sankey_depth,
         )
         if trade_sankey is None:
             if sankey_prefix:
@@ -522,16 +952,15 @@ else:
                 st.rerun()
             st.caption(
                 "Flow widths show recorded customs trade value, not money transfers. "
-                "Hover a node or band for its full product name; click a code node "
-                "or flow band to drill down. "
-                "The 8 largest visible positive product classes are shown "
-                "individually; remaining product classes are grouped as "
-                "non-clickable Other."
+                "Hover a node or band for its full product name; click any scope "
+                "or child node to drill down. Two hierarchy levels are shown at "
+                "once, so every view has composition to compare."
             )
 
         if sankey_prefix:
-            selected_rows = details.loc[
-                details["Product code"].astype(str).str.startswith(sankey_prefix)
+            # Leaf rows only: parent rows would double-count the branch total.
+            selected_rows = leaf_details.loc[
+                leaf_details["Product code"].astype(str).str.startswith(sankey_prefix)
             ]
             selected_timeline = (
                 selected_rows.groupby("Date", as_index=False)["Value (EUR)"]
@@ -553,26 +982,52 @@ else:
 
         chart_version = st.session_state.get("product_chart_version", 0)
         product_chart_column, licence_chart_column = st.columns([2, 1])
-        product_class_codes = all_products["Product code"].astype(str).tolist()
-        selected_products = all_products.head(50).copy()
-        selected_products["Product code"] = selected_products["Product code"].astype(
-            str
+        # Stacked bars mirror the Sankey: scope level on the axis, one level
+        # deeper as segments. Mixed queries tag leaves, so parent rows never
+        # double-count into the bars.
+        leaf_scope_products = leaf_products.copy()
+        leaf_scope_products["Product code"] = leaf_scope_products["Product code"].astype(str)
+        bar_depths = leaf_scope_products.loc[
+            leaf_scope_products["Product code"].str.startswith(sankey_prefix),
+            "Product code",
+        ].str.len()
+        bar_deepest = int(bar_depths.max()) if not bar_depths.empty else max(len(sankey_prefix), 2)
+        if bar_deepest <= len(sankey_prefix):
+            scope_depth = max(len(sankey_prefix) - 2, 2)
+        else:
+            scope_depth = max(len(sankey_prefix), min(bar_deepest - 2, 6))
+            if scope_depth < 2:
+                scope_depth = 2
+        selected_products = (
+            leaf_scope_products.loc[
+                leaf_scope_products["Product code"].str.startswith(sankey_prefix)
+            ]
+            .sort_values("Value (EUR)", ascending=False)
+            .head(50)
+            .copy()
         )
         selected_products["CN code"] = selected_products["Product code"].map(
             format_cn_code
         )
-        selected_products["CN group"] = selected_products["Product code"].str[:2].map(
-            format_cn_code
+        child_depth = (
+            int(selected_products["Product code"].str.len().max())
+            if not selected_products.empty
+            else scope_depth + 2
         )
+        group_length = scope_depth
+        code_length = max(child_depth, group_length + 2)
+        selected_products["CN group"] = selected_products["Product code"].str[
+            :group_length
+        ].map(format_cn_code)
         selected_group_count = selected_products["CN group"].nunique()
         with product_chart_column:
-            st.subheader("Product classes · 2-digit groups")
+            st.subheader(f"Product classes · {code_length}-digit classes by {group_length}-digit group")
             st.caption(
                 f"Showing the top {len(selected_products):,} of "
-                f"{len(all_products):,} product classes across "
-                f"{selected_group_count:,} groups. Each bar is grouped by its "
-                "two-digit code and stacked by product class; select a segment "
-                "to load its time series."
+                f"{len(leaf_scope_products):,} product classes across "
+                f"{selected_group_count:,} groups. Each bar is a {group_length}-digit group "
+                f"stacked by {code_length}-digit product class; select a segment "
+                "to drill deeper."
             )
             if st.session_state.get("selectedProductClasses"):
                 if st.button(
@@ -596,7 +1051,9 @@ else:
                 selected_products.assign(
                     **{
                         "Selected": selected_products["Product code"].map(
-                            lambda code: any(
+                            lambda code, _focus=sankey_prefix: bool(_focus)
+                            and code == _focus
+                            or any(
                                 code.startswith(selected_code)
                                 for selected_code in st.session_state.get(
                                     "selectedProductClasses", []
@@ -620,7 +1077,7 @@ else:
                     sort=alt.EncodingSortField(
                         field="Value (EUR)", op="sum", order="descending"
                     ),
-                    axis=alt.Axis(title="2-digit CN group"),
+                    axis=alt.Axis(title=f"{group_length}-digit CN group"),
                 ),
                 color=alt.condition(
                     alt.datum.Selected,
@@ -660,7 +1117,7 @@ else:
                 width="stretch",
                 key=(
                     f"product-category-chart-{chart_version}-"
-                    f"{hash(tuple(product_class_codes))}"
+                    f"{hash(tuple(selected_products['Product code'].astype(str).tolist()))}"
                 ),
                 on_select="rerun",
                 selection_mode="product_class_bar_selection",
@@ -850,226 +1307,5 @@ else:
                         "Load the public archive to see decision counts. "
                         "Yearly results and decision text are cached locally."
                     )
-        st.subheader("Product class PCA")
-        with st.container():
-            st.write(
-                "Compare how selected product classes move together over time. "
-                "Period dots show customs-value profiles; labeled diamonds show "
-                "each product class's contribution to the axes."
-            )
-            st.write(
-                "Values are standardized by product class so large classes do not "
-                "dominate. This uses customs data, not procurement data. "
-                "The available customs and exporter datasets do not link company "
-                "names to product classes or customs values."
-            )
-            selected_pca_codes = product_class_codes[
-                : min(8, len(product_class_codes))
-            ]
-            try:
-                pca_scores, pca_categories, explained_variance = make_customs_pca(
-                    details, selected_pca_codes
-                )
-            except ValueError as error:
-                st.info(str(error))
-            else:
-                st.metric(
-                    "Variance explained by displayed axes",
-                    f"{explained_variance.sum():.1%}",
-                )
-                period_chart = (
-                    alt.Chart(pca_scores)
-                    .mark_circle(
-                        size=100,
-                        filled=True,
-                        color="#426D78",
-                        stroke="#202629",
-                        strokeWidth=1,
-                    )
-                    .encode(
-                        x=alt.X(
-                            "PC1:Q",
-                            title=f"PC1 ({explained_variance[0]:.1%})",
-                            scale=alt.Scale(zero=False),
-                        ),
-                        y=alt.Y(
-                            "PC2:Q",
-                            title=f"PC2 ({explained_variance[1]:.1%})",
-                            scale=alt.Scale(zero=False),
-                        ),
-                        tooltip=[
-                            alt.Tooltip("Period:T", title="Period"),
-                            alt.Tooltip("PC1:Q", format=".3f"),
-                            alt.Tooltip("PC2:Q", format=".3f"),
-                        ],
-                    )
-                )
-                selected_product_classes = st.session_state.get(
-                    "selectedProductClasses", []
-                )
-                category_points = (
-                    alt.Chart(
-                        pca_categories.assign(
-                            **{
-                                "Selected": pca_categories["Product code"].map(
-                                    lambda code: any(
-                                        str(code).startswith(selected_code)
-                                        for selected_code in selected_product_classes
-                                    )
-                                )
-                            }
-                        )
-                    )
-                    .mark_point(
-                        shape="diamond",
-                        size=110,
-                        filled=True,
-                        strokeWidth=2,
-                    )
-                    .encode(
-                        x=alt.X("PC1:Q"),
-                        y=alt.Y("PC2:Q"),
-                        fill=alt.condition(
-                            alt.datum.Selected,
-                            alt.value("#D27A37"),
-                            alt.value("#333A3D"),
-                        ),
-                        size=alt.condition(
-                            alt.datum.Selected,
-                            alt.value(260),
-                            alt.value(110),
-                        ),
-                        stroke=alt.condition(
-                            alt.datum.Selected,
-                            alt.value("#202629"),
-                            alt.value("#333A3D"),
-                        ),
-                        tooltip=[
-                            alt.Tooltip("Product:N", title="Product class"),
-                            alt.Tooltip("Product code:N", title="Product class code"),
-                            alt.Tooltip("PC1:Q", title="PC1 coordinate", format=".3f"),
-                            alt.Tooltip("PC2:Q", title="PC2 coordinate", format=".3f"),
-                            alt.Tooltip(
-                                "Confidence:Q",
-                                title="Two-PC representation quality",
-                                format=".1%",
-                            ),
-                        ],
-                    )
-                    .add_params(
-                        alt.selection_point(
-                            fields=["Product code"],
-                            name="product_class_bar_selection",
-                            clear=False,
-                            toggle=False,
-                        )
-                    )
-                )
-                category_labels = (
-                    alt.Chart(
-                        pca_categories.assign(
-                            **{
-                                "CN code": pca_categories["Product code"].map(
-                                    format_cn_code
-                                )
-                            }
-                        )
-                    )
-                    .mark_text(
-                        align="left",
-                        baseline="middle",
-                        dx=7,
-                        fontSize=11,
-                        fontWeight="bold",
-                        color="#202629",
-                    )
-                    .encode(
-                        x=alt.X("PC1:Q"),
-                        y=alt.Y("PC2:Q"),
-                        text=alt.Text("CN code:N"),
-                    )
-                )
-                pca_chart = (
-                    (period_chart + category_points + category_labels)
-                    .properties(height=440)
-                    .interactive()
-                    .configure_axis(
-                        labelColor="#333A3D",
-                        titleColor="#333A3D",
-                        gridColor="#A9C0C866",
-                        domainColor="#A9C0C8",
-                        labelFont="Arial",
-                        titleFont="Arial",
-                    )
-                    .configure_view(stroke="#A9C0C8")
-                )
-                pca_chart_event = st.altair_chart(
-                    pca_chart,
-                    width="stretch",
-                    key=(
-                        f"pca-product-classes-{country}-{flow}-{frequency}-"
-                        f"{start}-{end}-{hash(tuple(selected_pca_codes))}-"
-                        f"{hash(tuple(selected_product_classes))}"
-                    ),
-                    on_select="rerun",
-                    selection_mode="product_class_bar_selection",
-                )
-                clicked_pca_codes = selected_product_codes(pca_chart_event.selection)
-                if navigate_to_product_classes(clicked_pca_codes):
-                    st.rerun()
-                st.caption(
-                    "Nearby periods have similar standardized customs-value "
-                    "profiles. Product-class coordinates indicate association "
-                    "with each axis; they are not company-level observations. "
-                    "The confidence score is cos²: the share of product-class variation "
-                    "represented by the displayed two components, not statistical "
-                    "certainty. High 🟢 means over 90% representation."
-                )
-                pca_table = pca_categories.sort_values(
-                    "Confidence", ascending=False
-                ).reset_index(drop=True)
-                pca_table["Assessment"] = pca_table["Confidence"].map(
-                    lambda score: "High 🟢" if score > 0.9 else "—"
-                )
-                pca_table_selection = st.dataframe(
-                    pca_table,
-                    hide_index=True,
-                    width="stretch",
-                    column_config={
-                        "PC1": st.column_config.NumberColumn(
-                            "PC1 coordinate", format="%.3f"
-                        ),
-                        "PC2": st.column_config.NumberColumn(
-                            "PC2 coordinate", format="%.3f"
-                        ),
-                        "Confidence": st.column_config.NumberColumn(
-                            "Confidence score", format="percent"
-                        ),
-                        "Assessment": st.column_config.TextColumn("Assessment"),
-                    },
-                    on_select="rerun",
-                    selection_mode="multi-row",
-                    key=(
-                        f"pca-product-class-table-{country}-{flow}-{frequency}-"
-                        f"{start}-{end}-{hash(tuple(selected_pca_codes))}"
-                    ),
-                )
-                pca_table_product_codes = selected_table_product_codes(
-                    pca_table_selection.selection, pca_table
-                )
-                if navigate_to_product_classes(pca_table_product_codes):
-                    st.rerun()
-
-        if not sankey_prefix:
-            st.subheader(f"{frequency.title()} trade value")
-            st.caption(
-                "Series is the total across all returned product classes."
-            )
-            st.line_chart(
-                timeline,
-                x="Date",
-                y="Value (EUR)",
-                color="#426D78",
-            )
 
 st.caption("Source: Finnish Customs (Tulli), ULJAS. Quote Tulli when reusing the data.")

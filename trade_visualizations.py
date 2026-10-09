@@ -43,7 +43,7 @@ def make_trade_sankey(
     destination,
     classification_labels,
     parent_code="",
-    zoom_depth=0,
+    max_visible=8,
 ):
     codes = products["Product code"].astype(str)
     valid_codes = codes.str.fullmatch(r"\d{2,8}")
@@ -54,110 +54,152 @@ def make_trade_sankey(
     trade_products = trade_products.loc[
         trade_products["Product code"].str.startswith(parent_code)
     ]
+    if trade_products.empty:
+        return None
+    # Leaf rows only: mixed queries carry parent rows for labels/totals, but
+    # the Sankey must aggregate leaves or every euro counts twice. A code is
+    # a leaf when no other loaded code extends it.
+    loaded_codes = trade_products["Product code"].unique().tolist()
+    leaf_mask = trade_products["Product code"].map(
+        lambda code: not any(
+            other != code and str(other).startswith(str(code))
+            for other in loaded_codes
+        )
+    )
+    trade_products = trade_products.loc[leaf_mask].copy()
+    if trade_products.empty:
+        return None
     max_depth = trade_products["Product code"].str.len().max()
-    if pd.isna(max_depth) or max_depth <= len(parent_code):
+    if pd.isna(max_depth):
         return None
 
-    depth = min((zoom_depth + 1) * 2, int(max_depth))
-    trade_products["Drill code"] = trade_products["Product code"].str.slice(0, depth)
+    # Two hierarchy levels at once: the scope level (CN2 at root, the clicked
+    # branch below) plus one level deeper. Single-level branches were the
+    # zoom-then-climb trap; two levels make every view compositional. When
+    # the branch holds a single level (CN8 leaves), derive the scope locally
+    # via prefix so the view still shows composition.
+    deepest = int(max_depth)
+    if deepest <= len(parent_code):
+        scope_depth = max(len(parent_code) - 2, 2)
+        child_depth = len(parent_code)
+    else:
+        scope_depth = max(len(parent_code), min(deepest - 2, 6))
+        if scope_depth < 2:
+            scope_depth = 2
+        child_depth = deepest
+    trade_products["Scope code"] = trade_products["Product code"].str.slice(
+        0, scope_depth
+    )
+    trade_products["Drill code"] = trade_products["Product code"].str.slice(
+        0, child_depth
+    )
     cn8_labels = trade_products.drop_duplicates("Product code").set_index(
         "Product code"
     )["Product"]
-    grouped_products = (
-        trade_products.groupby("Drill code", as_index=False)
+
+    def class_label(code):
+        if not code:
+            return ""
+        if len(str(code)) == 8:
+            return str(cn8_labels.get(code, ""))
+        return str(classification_labels.get(len(str(code)), {}).get(code, ""))
+
+    # Top scope nodes (CN2 chapters at root, the clicked branch below) by
+    # value, with one child level under each: two hierarchy levels in one
+    # view so every navigation level has composition to compare.
+    scope_totals = (
+        trade_products.groupby("Scope code", as_index=False)
         .agg({"Value (EUR)": "sum"})
         .sort_values("Value (EUR)", ascending=False)
     )
-    grouped_products["Product"] = grouped_products["Drill code"].map(
-        lambda code: (
-            cn8_labels.get(code, "")
-            if len(code) == 8
-            else classification_labels.get(len(code), {}).get(code, "")
-        )
-    )
-    total_value = grouped_products["Value (EUR)"].sum()
-    trade_products = grouped_products
-    if trade_products.empty:
+    if scope_totals.empty:
         return None
-
-    visible_products = trade_products.head(8).reset_index(drop=True)
-    remaining_products = trade_products.iloc[8:]
-    if not remaining_products.empty:
-        visible_products.loc[len(visible_products)] = {
-            "Drill code": None,
-            "Product": f"Other product classes ({len(remaining_products):,})",
-            "Value (EUR)": remaining_products["Value (EUR)"].sum(),
-        }
-
-    category_labels = [
-        row["Product"]
-        if pd.isna(row["Drill code"])
-        else format_cn_code(row["Drill code"])
-        for _, row in visible_products.iterrows()
-    ]
-    category_codes = [
-        None if pd.isna(code) else code for code in visible_products["Drill code"]
-    ]
-    category_full_names = [
-        str(name) if code is not None else "Combined remaining product classes"
-        for code, name in zip(category_codes, visible_products["Product"])
-    ]
-    category_count = len(category_labels)
-    values = visible_products["Value (EUR)"].tolist()
-    plot_height = 900
-    gap_fraction = min(10 / plot_height, 0.5 / category_count)
-    total_node_fraction = max(0.05, 1 - gap_fraction * (category_count - 1))
-    node_height_fractions = [
-        value / total_value * total_node_fraction for value in values
-    ]
-    remaining_fraction = 1 - sum(node_height_fractions) - gap_fraction * (
-        category_count - 1
+    visible_scopes = scope_totals.head(max_visible).copy()
+    scope_set = set(visible_scopes["Scope code"])
+    ranked_children = (
+        trade_products.loc[trade_products["Scope code"].isin(scope_set)]
+        .groupby(["Scope code", "Drill code"], as_index=False)
+        .agg({"Value (EUR)": "sum"})
+        .sort_values("Value (EUR)", ascending=False)
     )
-    cursor = max(0, remaining_fraction / 2)
-    category_top_positions = []
-    for node_height in node_height_fractions:
-        category_top_positions.append(cursor)
-        cursor += node_height + gap_fraction
+    other_scopes = scope_totals.loc[~scope_totals["Scope code"].isin(scope_set)]
+    other_value = float(other_scopes["Value (EUR)"].sum()) if not other_scopes.empty else 0.0
+    total_value = float(scope_totals["Value (EUR)"].sum())
+
+    scope_labels = [format_cn_code(code) for code in visible_scopes["Scope code"]]
+    scope_names = [class_label(code) for code in visible_scopes["Scope code"]]
+    child_labels = [format_cn_code(code) for code in ranked_children["Drill code"]]
+    child_names = [class_label(code) for code in ranked_children["Drill code"]]
+
+    node_labels = [source, *scope_labels, *child_labels]
+    if other_value > 0:
+        node_labels.append(f"Other ({len(other_scopes):,})")
+    node_labels.append(destination)
+    node_names = [source, *scope_names, *child_names]
+    if other_value > 0:
+        node_names.append("Combined remaining product classes")
+    node_names.append(destination)
+    scope_count = len(visible_scopes)
+    child_count = len(ranked_children)
+    has_other = other_value > 0
+    scope_index = {code: index + 1 for index, code in enumerate(visible_scopes["Scope code"])}
+    child_index = {code: scope_count + 1 + index for index, code in enumerate(ranked_children["Drill code"])}
+    destination_index = scope_count + child_count + (1 if has_other else 0) + 1
+
+    link_source, link_target, link_value, link_custom = [], [], [], []
+    for position, row in enumerate(visible_scopes.itertuples()):
+        link_source.append(0)
+        link_target.append(scope_index[row._1])
+        link_value.append(float(row._2))
+        link_custom.append([scope_labels[position], scope_names[position]])
+    for row in ranked_children.itertuples():
+        position = child_index[row._2] - scope_count - 1
+        link_source.append(scope_index[row._1])
+        link_target.append(child_index[row._2])
+        link_value.append(float(row._3))
+        link_custom.append([child_labels[position], child_names[position]])
+    for row in ranked_children.itertuples():
+        position = child_index[row._2] - scope_count - 1
+        link_source.append(child_index[row._2])
+        link_target.append(destination_index)
+        link_value.append(float(row._3))
+        link_custom.append([child_labels[position], child_names[position]])
+    if has_other:
+        other_index = scope_count + child_count + 1
+        link_source.extend([0, other_index])
+        link_target.extend([other_index, destination_index])
+        link_value.extend([other_value, other_value])
+        link_custom.extend([[f"Other ({len(other_scopes):,})", "Combined remaining product classes"]] * 2)
+
+    node_count = len(node_labels)
+    plot_height = 900
+    category_codes = visible_scopes["Scope code"].tolist() + ranked_children["Drill code"].tolist()
+    category_labels = scope_labels + child_labels
+    category_count = node_count - 2
+    scope_x = [0.02] + [0.32] * scope_count + [0.66] * child_count + ([0.66] if has_other else []) + [0.98]
+    scope_y = [0.02] + [0.02] * (node_count - 2) + [0.02]
 
     figure = go.Figure(
         go.Sankey(
             arrangement="snap",
             node={
-                "label": [source, *category_labels, destination],
+                "label": node_labels,
                 "color": ["#333a3d", *["#426d78"] * category_count, "#426d78"],
                 "line": {"color": "#333a3d", "width": 0.5},
                 "pad": 10,
                 "thickness": 14,
-                "x": [0.02, *[0.5] * category_count, 0.98],
-                "y": [0.02, *category_top_positions, 0.02],
-                "customdata": [
-                    source,
-                    *category_full_names,
-                    destination,
-                ],
+                "x": scope_x,
+                "y": scope_y,
+                "customdata": node_names,
                 "hovertemplate": "%{label}<br>%{customdata}<extra></extra>",
             },
             link={
-                "source": [0] * category_count
-                + list(range(1, category_count + 1)),
-                "target": list(range(1, category_count + 1))
-                + [category_count + 1] * category_count,
-                "value": values + values,
-                "color": ["rgba(66, 109, 120, 0.76)"]
-                * category_count
-                + ["rgba(66, 109, 120, 0.76)"]
-                * category_count,
-                "customdata": [
-                    [label, name]
-                    for label, name in zip(category_labels, category_full_names)
-                ]
-                * 2,
-                "hovercolor": [
-                    "rgba(66, 109, 120, 0.76)",
-                ]
-                * category_count
-                + ["rgba(66, 109, 120, 0.76)"]
-                * category_count,
+                "source": link_source,
+                "target": link_target,
+                "value": link_value,
+                "color": ["rgba(66, 109, 120, 0.55)"] * len(link_value),
+                "customdata": link_custom,
+                "hovercolor": ["rgba(66, 109, 120, 0.76)"] * len(link_value),
                 "hovertemplate": (
                     "%{source.label} → %{target.label}<br>"
                     "%{customdata[0]} · %{customdata[1]}<br>"
@@ -167,7 +209,7 @@ def make_trade_sankey(
         )
     )
     figure.update_layout(
-        height=max(plot_height, 30 * category_count + 40),
+        height=plot_height,
         margin={"l": 80, "r": 80, "t": 16, "b": 16},
         font={"family": "Arial, sans-serif", "size": 12, "color": "#202629"},
         hoverlabel={
@@ -187,21 +229,16 @@ def selected_sankey_code(clicked_points, category_codes):
     if point.get("curveNumber") != 0:
         return None
 
+    # Two-level layout: node 0 is the source, the last node is the
+    # destination, everything in between is a clickable CN code. Link clicks
+    # resolve to the CN endpoint rather than the source/destination.
+    node_count = len(category_codes) + 2
     if "source" in point or "target" in point:
         source = point.get("source")
         target = point.get("target")
-        category_node = (
-            target
-            if source == 0
-            else source
-            if target == len(category_codes) + 1
-            else None
-        )
-        if (
-            isinstance(category_node, int)
-            and 1 <= category_node <= len(category_codes)
-        ):
-            return category_codes[category_node - 1]
+        for node in (target, source):
+            if isinstance(node, int) and 1 <= node <= len(category_codes):
+                return category_codes[node - 1]
         return None
 
     custom_code = point.get("customdata")
