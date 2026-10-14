@@ -15,6 +15,7 @@ from trade_data import (
     load_data,
     load_product_classification_labels,
     make_dataframes,
+    parse_cn_code,
     product_query_for_codes,
     selected_product_codes,
     selected_table_product_codes,
@@ -40,14 +41,16 @@ def bump_chart_versions():
 
 
 def request_product_query(product_prefix, sankey_prefix, selected_codes=None):
-    product_prefix = str(product_prefix)
-    sankey_prefix = str(sankey_prefix)
+    product_prefix = parse_cn_code(product_prefix)
+    sankey_prefix = parse_cn_code(sankey_prefix)
     if selected_codes is None:
         selected_codes = (product_prefix,) if product_prefix else ()
     elif isinstance(selected_codes, str):
-        selected_codes = (selected_codes,)
+        selected_codes = (parse_cn_code(selected_codes),)
     else:
-        selected_codes = tuple(dict.fromkeys(str(code) for code in selected_codes))
+        selected_codes = tuple(
+            dict.fromkeys(parse_cn_code(code) for code in selected_codes)
+        )
     query_prefixes = selected_codes or ((product_prefix,) if product_prefix else ())
     st.session_state["pending_product_prefixes"] = query_prefixes
     st.session_state["sankey_prefix"] = sankey_prefix
@@ -60,13 +63,22 @@ def navigate_to_product_classes(product_codes, replace_selection=False):
         return False
     if isinstance(product_codes, str):
         product_codes = (product_codes,)
+    # Chart clicks may return display labels ("CN 48 10 29 80"): parse them
+    # back to raw digits before any prefix matching or querying.
+    product_codes = tuple(
+        dict.fromkeys(
+            code for code in (parse_cn_code(code) for code in product_codes) if code
+        )
+    )
+    if not product_codes:
+        return False
     current_codes = (
         []
         if replace_selection
         else st.session_state.get("selectedProductClasses", [])
     )
     selected_codes = list(current_codes)
-    for code in dict.fromkeys(str(code) for code in product_codes):
+    for code in product_codes:
         selected_codes = [
             current_code
             for current_code in selected_codes

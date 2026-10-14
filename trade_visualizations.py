@@ -156,6 +156,7 @@ def make_trade_sankey(
             other_child_rows.append(row)
 
     child_labels = [format_cn_code(r["drill"]) for r in ranked_children]
+    child_codes = [str(r["drill"]) for r in ranked_children]
     child_names = [class_label(r["drill"]) for r in ranked_children]
     child_count = len(child_labels)
 
@@ -237,7 +238,9 @@ def make_trade_sankey(
 
     node_count = len(node_labels)
     plot_height = 900
-    category_codes = visible_scopes["Scope code"].tolist() + child_labels
+    # category_codes must be raw member codes: clicks feed it straight back
+    # into product_query_for_codes, which queries ULJAS with them.
+    category_codes = [str(code) for code in visible_scopes["Scope code"]] + child_codes
     category_labels = scope_labels + child_labels
     # One x per node, by column: source(1), scopes(2), children(3),
     # destination(4). The scope-level "Other" belongs with the scopes in

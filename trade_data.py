@@ -61,7 +61,9 @@ def product_query_for_codes(prefixes):
     - A leaf CN8 code has no deeper children: show its CN6 parent's CN8
       children (siblings) instead, so a click never dead-ends.
     """
-    prefixes = tuple(dict.fromkeys(str(prefix) for prefix in prefixes if prefix))
+    prefixes = tuple(
+        dict.fromkeys(parse_cn_code(prefix) for prefix in prefixes if prefix)
+    )
     if not prefixes:
         all_codes = load_product_classification_codes(5)
         product_codes = tuple(
@@ -72,9 +74,17 @@ def product_query_for_codes(prefixes):
         return 5, product_codes
 
     if any(not prefix.isdigit() for prefix in prefixes):
-        if len(prefixes) == 1:
-            return 1, prefixes
-        raise ValueError("Multiple product classes must use numeric CN codes.")
+        if len(prefixes) != 1:
+            raise ValueError("Multiple product classes must use numeric CN codes.")
+        # Aggregate codes ("XX", "00 - 99") live in several classifications;
+        # send each to one that actually contains it instead of assuming CN8.
+        prefix = prefixes[0]
+        for classification_id in (1, 2, 4, 5, 6):
+            if prefix in load_product_classification_codes(classification_id):
+                return classification_id, (prefix,)
+        raise ValueError(
+            f"Product code {prefix!r} is not available in any product classification."
+        )
 
     # Leaf CN8 codes have no children: query the CN6 parent instead so the
     # view shows CN8 siblings rather than a single-product dead end.
@@ -210,6 +220,20 @@ def format_cn_code(code):
             code[index : index + 2] for index in range(0, len(code), 2)
         )
     return f"CN {code}"
+
+
+def parse_cn_code(code):
+    """Reverse ``format_cn_code``: return the raw ULJAS member code.
+
+    Chart clicks can surface display labels such as ``"CN 48 10 29 80"``
+    instead of the raw code ``"48102980"``. Collapse spaced digit groups
+    back to digits; pass aggregate codes ("XX", "00 - 99") through unchanged.
+    """
+    text = str(code).strip()
+    text = re.sub(r"^CN\s+", "", text)
+    if re.fullmatch(r"\d+(?: \d+)*", text):
+        text = text.replace(" ", "")
+    return text
 
 
 def selected_product_codes(selection):
